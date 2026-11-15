@@ -1,0 +1,105 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: eventflow-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: microservice
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eventflow-network
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: eventflow-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eventflow-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eventflow-app
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: dev
+      PORT: 3200
+      LOG_LEVEL: info
+      SHUTDOWN_TIMEOUT: 30
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: microservice
+      DB_SSL_MODE: disable
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "3200:3200"
+    networks:
+      - eventflow-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: eventflow-worker
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: dev
+      LOG_LEVEL: info
+      SHUTDOWN_TIMEOUT: 30
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: microservice
+      DB_SSL_MODE: disable
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+    networks:
+      - eventflow-network
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+networks:
+  eventflow-network:
+    driver: bridge
