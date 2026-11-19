@@ -6,8 +6,9 @@ import (
 	"microservice/internal/order/application/dto"
 	"microservice/internal/order/application/usecase"
 	"microservice/internal/order/domain/event"
-	"microservice/internal/order/domain/repository"
 	"microservice/internal/order/infrastructure/eventpublisher"
+	"microservice/pkg/apperrors"
+	"microservice/pkg/httputil"
 	"net/http"
 	"strings"
 
@@ -16,18 +17,18 @@ import (
 )
 
 type OrderHandler struct {
-	createOrderUC    *usecase.CreateOrderUseCase
-	getOrderUC       *usecase.GetOrderUseCase
-	eventPublisher   eventpublisher.Publisher
-	log              *zap.Logger
+	createOrderUC  *usecase.CreateOrderUseCase
+	getOrderUC     *usecase.GetOrderUseCase
+	eventPublisher eventpublisher.Publisher
+	log            *zap.Logger
 }
 
 func NewOrderHandler(createOrderUC *usecase.CreateOrderUseCase, getOrderUC *usecase.GetOrderUseCase, eventPublisher eventpublisher.Publisher, log *zap.Logger) *OrderHandler {
 	return &OrderHandler{
-		createOrderUC:   createOrderUC,
-		getOrderUC:      getOrderUC,
-		eventPublisher:  eventPublisher,
-		log:             log,
+		createOrderUC:  createOrderUC,
+		getOrderUC:     getOrderUC,
+		eventPublisher: eventPublisher,
+		log:            log,
 	}
 }
 
@@ -39,36 +40,36 @@ func NewOrderHandler(createOrderUC *usecase.CreateOrderUseCase, getOrderUC *usec
 // @Param request body dto.CreateOrderRequest true "Create Order Request"
 // @Param Idempotency-Key header string true "Idempotency key (maximum 255 bytes)"
 // @Success 201 {object} dto.CreateOrderResponse
-// @Failure 400 {object} map[string]string
-// @Failure 409 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// @Failure 400 {object} httputil.ErrorResponse
+// @Failure 409 {object} httputil.ErrorResponse
+// @Failure 413 {object} httputil.ErrorResponse
+// @Failure 500 {object} httputil.ErrorResponse
 // @Router /orders [post]
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	var req dto.CreateOrderRequest
 
-	key := c.GetHeader("Idempotency-Key")
-	if strings.TrimSpace(key) == "" || len(key) > 255 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "idempotency key must be nonempty and at most 255 bytes"})
-		return
-	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		// El detalle del binding se queda en el log: nunca se devuelve al cliente.
+		h.log.Warn("invalid create order payload", zap.Error(err), zap.String("path", c.FullPath()))
+
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			h.respondError(c, apperrors.NewPayloadTooLargeError("REQUEST_TOO_LARGE", "request body is too large"))
+			return
+		}
+
+		h.respondError(c, apperrors.NewValidationError("REQUEST_INVALID", "invalid request body"))
 		return
 	}
 
 	if validationErr := validateCreateOrderRequest(&req); validationErr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": validationErr.Error()})
+		h.respondError(c, apperrors.NewValidationError("ORDER_INVALID", validationErr.Error()))
 		return
 	}
 
-	res, err := h.createOrderUC.Execute(c.Request.Context(), &req, key)
+	res, err := h.createOrderUC.Execute(c.Request.Context(), &req, c.GetHeader("Idempotency-Key"))
 	if err != nil {
-		if errors.Is(err, repository.ErrIdempotencyConflict) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		h.respondError(c, err)
 		return
 	}
 
@@ -87,8 +88,24 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	c.JSON(http.StatusCreated, res)
 }
 
+// respondError traduce el error a una respuesta HTTP consistente.
+// Los errores 5xx solo exponen un mensaje genérico; el detalle queda en los logs.
+func (h *OrderHandler) respondError(c *gin.Context, err error) {
+	status, body := httputil.MapErrorToHttp(err)
+
+	if status >= http.StatusInternalServerError {
+		h.log.Error("request failed",
+			zap.String("method", c.Request.Method),
+			zap.String("path", c.Request.URL.Path),
+			zap.Error(err),
+		)
+	}
+
+	c.JSON(status, body)
+}
+
 func validateCreateOrderRequest(req *dto.CreateOrderRequest) error {
-	if req.CustomerID == "" {
+	if strings.TrimSpace(req.CustomerID) == "" {
 		return errors.New("customer_id is required")
 	}
 
@@ -97,7 +114,7 @@ func validateCreateOrderRequest(req *dto.CreateOrderRequest) error {
 	}
 
 	for i, item := range req.Items {
-		if item.ProductID == "" {
+		if strings.TrimSpace(item.ProductID) == "" {
 			return fmt.Errorf("items[%d].product_id is required", i)
 		}
 
@@ -128,20 +145,13 @@ func calculateTotalAmount(req *dto.CreateOrderRequest) float64 {
 // @Produce json
 // @Param id path string true "Order ID"
 // @Success 200 {object} dto.GetOrderResponse
-// @Failure 404 {object} map[string]string
-// @Failure 500 {object} map[string]string
+// @Failure 404 {object} httputil.ErrorResponse
+// @Failure 500 {object} httputil.ErrorResponse
 // @Router /orders/{id} [get]
 func (h *OrderHandler) GetOrder(c *gin.Context) {
-	orderID := c.Param("id")
-
-	res, err := h.getOrderUC.Execute(c.Request.Context(), orderID)
+	res, err := h.getOrderUC.Execute(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		if errors.Is(err, usecase.ErrOrderNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
-			return
-		}
-
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		h.respondError(c, err)
 		return
 	}
 

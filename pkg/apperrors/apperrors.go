@@ -5,12 +5,13 @@ import "fmt"
 type ErrorType string
 
 const (
-	ErrorTypeValidation   ErrorType = "VALIDATION_ERROR"
-	ErrorTypeNotFound     ErrorType = "NOT_FOUND"
-	ErrorTypeConflict     ErrorType = "CONFLICT"
-	ErrorTypeUnauthorized ErrorType = "UNAUTHORIZED"
-	ErrorTypeForbidden    ErrorType = "FORBIDDEN"
-	ErrorTypeInternal     ErrorType = "INTERNAL_ERROR"
+	ErrorTypeValidation      ErrorType = "VALIDATION_ERROR"
+	ErrorTypeNotFound        ErrorType = "NOT_FOUND"
+	ErrorTypeConflict        ErrorType = "CONFLICT"
+	ErrorTypeUnauthorized    ErrorType = "UNAUTHORIZED"
+	ErrorTypeForbidden       ErrorType = "FORBIDDEN"
+	ErrorTypePayloadTooLarge ErrorType = "PAYLOAD_TOO_LARGE"
+	ErrorTypeInternal        ErrorType = "INTERNAL_ERROR"
 )
 
 // DomainError representa errores del dominio de negocio
@@ -67,6 +68,14 @@ func NewUnauthorizedError(code, message string) *DomainError {
 func NewForbiddenError(code, message string) *DomainError {
 	return &DomainError{
 		Type:    ErrorTypeForbidden,
+		Code:    code,
+		Message: message,
+	}
+}
+
+func NewPayloadTooLargeError(code, message string) *DomainError {
+	return &DomainError{
+		Type:    ErrorTypePayloadTooLarge,
 		Code:    code,
 		Message: message,
 	}

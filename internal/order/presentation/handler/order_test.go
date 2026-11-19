@@ -15,6 +15,7 @@ import (
 	"microservice/internal/order/domain/entity"
 	"microservice/internal/order/domain/event"
 	"microservice/internal/order/domain/repository"
+	"microservice/pkg/httputil"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -53,7 +54,7 @@ func (m *mockOrderRepository) SaveIdempotent(ctx context.Context, order *entity.
 	if err := m.Save(ctx, order); err != nil {
 		return repository.CreatedOrder{}, err
 	}
-	return repository.CreatedOrder{ID: order.ID(), CreatedAt: order.CreatedAt()}, nil
+	return repository.CreatedOrder{ID: order.ID(), Status: order.Status().String(), CreatedAt: order.CreatedAt()}, nil
 }
 
 func (m *mockOrderRepository) GetByID(ctx context.Context, id string) (*entity.Order, error) {
@@ -115,6 +116,37 @@ func TestCreateOrder_Success(t *testing.T) {
 
 	if res.CreatedAt.IsZero() {
 		t.Errorf("Expected CreatedAt to be set")
+	}
+
+	if res.Status != "pending" {
+		t.Errorf("Expected initial status pending, got %q", res.Status)
+	}
+}
+
+func TestCreateOrder_PayloadTooLarge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockRepo := newMockOrderRepository()
+	handler := NewOrderHandler(
+		usecase.NewCreateOrderUseCase(mockRepo),
+		usecase.NewGetOrderUseCase(mockRepo),
+		&mockEventPublisher{},
+		zap.NewNop(),
+	)
+
+	body := `{"customer_id":"` + strings.Repeat("a", 1024) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-key")
+	req.Body = http.MaxBytesReader(httptest.NewRecorder(), req.Body, 16)
+	w := httptest.NewRecorder()
+
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	handler.CreateOrder(c)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("Expected status 413, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -180,6 +212,10 @@ func TestCreateOrder_InternalError(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("Expected status 500, got %d", w.Code)
 	}
+
+	if strings.Contains(w.Body.String(), "database error") {
+		t.Errorf("Response leaked internal error details: %s", w.Body.String())
+	}
 }
 
 func TestCreateOrder_IdempotencyKey(t *testing.T) {
@@ -213,6 +249,15 @@ func TestCreateOrder_IdempotencyKey(t *testing.T) {
 			h.CreateOrder(c)
 			if w.Code != tc.want {
 				t.Fatalf("status = %d, want %d: %s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusConflict {
+				var res httputil.ErrorResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+					t.Fatalf("invalid error payload: %v", err)
+				}
+				if res.Error.Code != "ORDER_IDEMPOTENCY_CONFLICT" {
+					t.Fatalf("error code = %q, want ORDER_IDEMPOTENCY_CONFLICT", res.Error.Code)
+				}
 			}
 		})
 	}
@@ -292,11 +337,13 @@ func TestGetOrder_NotFound(t *testing.T) {
 		t.Errorf("Expected status 404, got %d", w.Code)
 	}
 
-	var res map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &res)
+	var res httputil.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("Response is not a valid error payload: %v (%s)", err, w.Body.String())
+	}
 
-	if res["error"] != "order not found" {
-		t.Errorf("Expected 'order not found' error, got %v", res["error"])
+	if res.Error.Code != "ORDER_NOT_FOUND" {
+		t.Errorf("Expected ORDER_NOT_FOUND error code, got %q", res.Error.Code)
 	}
 }
 
@@ -321,5 +368,9 @@ func TestGetOrder_InternalError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("Expected status 500, got %d", w.Code)
+	}
+
+	if strings.Contains(w.Body.String(), "database connection error") {
+		t.Errorf("Response leaked internal error details: %s", w.Body.String())
 	}
 }

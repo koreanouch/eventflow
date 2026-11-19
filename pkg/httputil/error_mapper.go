@@ -1,6 +1,7 @@
 package httputil
 
 import (
+	"errors"
 	"microservice/pkg/apperrors"
 	"net/http"
 	"time"
@@ -18,9 +19,11 @@ type ErrorDetail struct {
 	Details string `json:"details,omitempty"`
 }
 
-// MapErrorToHttp convierte errores de dominio a respuestas HTTP
+// MapErrorToHttp convierte errores de dominio a respuestas HTTP.
+// Los errores no reconocidos se traducen a un 500 genérico sin exponer detalles internos.
 func MapErrorToHttp(err error) (int, ErrorResponse) {
-	if domainErr, ok := err.(*apperrors.DomainError); ok {
+	var domainErr *apperrors.DomainError
+	if errors.As(err, &domainErr) {
 		statusCode := getHttpStatusCode(domainErr.Type)
 
 		return statusCode, ErrorResponse{
@@ -57,6 +60,8 @@ func getHttpStatusCode(errorType apperrors.ErrorType) int {
 		return http.StatusUnauthorized
 	case apperrors.ErrorTypeForbidden:
 		return http.StatusForbidden
+	case apperrors.ErrorTypePayloadTooLarge:
+		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusInternalServerError
 	}

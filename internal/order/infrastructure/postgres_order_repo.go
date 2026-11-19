@@ -107,17 +107,17 @@ func (r *PostgresOrderRepository) SaveIdempotent(ctx context.Context, order *ent
 		INSERT INTO orders (id, customer_id, total_amount, status, created_at, idempotency_key, request_hash)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (idempotency_key) DO NOTHING
-		RETURNING id, created_at`,
+		RETURNING id, status, created_at`,
 		order.ID(), order.CustomerID(), order.TotalAmount(), order.Status().String(),
 		order.CreatedAt(), key, requestHash[:],
-	).Scan(&result.ID, &result.CreatedAt)
+	).Scan(&result.ID, &result.Status, &result.CreatedAt)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		var existingHash []byte
 		err = tx.QueryRow(ctx, `
-			SELECT id, created_at, request_hash FROM orders WHERE idempotency_key = $1`,
+			SELECT id, status, created_at, request_hash FROM orders WHERE idempotency_key = $1`,
 			key,
-		).Scan(&result.ID, &result.CreatedAt, &existingHash)
+		).Scan(&result.ID, &result.Status, &result.CreatedAt, &existingHash)
 		if err != nil {
 			return domainrepo.CreatedOrder{}, fmt.Errorf("failed to query idempotent order: %w", err)
 		}

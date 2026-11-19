@@ -51,7 +51,7 @@ func (m *mockOrderRepository) SaveIdempotent(ctx context.Context, order *entity.
 	if err := m.Save(ctx, order); err != nil {
 		return repository.CreatedOrder{}, err
 	}
-	return repository.CreatedOrder{ID: order.ID(), CreatedAt: order.CreatedAt()}, nil
+	return repository.CreatedOrder{ID: order.ID(), Status: order.Status().String(), CreatedAt: order.CreatedAt()}, nil
 }
 
 func (m *mockOrderRepository) GetByID(ctx context.Context, id string) (*entity.Order, error) {

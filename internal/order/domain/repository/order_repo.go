@@ -11,6 +11,7 @@ var ErrIdempotencyConflict = errors.New("idempotency key already used with diffe
 
 type CreatedOrder struct {
 	ID        string
+	Status    string
 	CreatedAt time.Time
 }
 

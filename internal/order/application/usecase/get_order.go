@@ -2,14 +2,15 @@ package usecase
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"microservice/internal/order/application/dto"
 	domainrepo "microservice/internal/order/domain/repository"
+	"microservice/pkg/apperrors"
 )
 
-var ErrOrderNotFound = errors.New("order not found")
+// ErrOrderNotFound is returned when the requested order does not exist.
+var ErrOrderNotFound = apperrors.NewNotFoundError("ORDER_NOT_FOUND", "order not found")
 
 type GetOrderUseCase struct {
 	repo domainrepo.OrderRepository
@@ -21,7 +22,7 @@ func NewGetOrderUseCase(repo domainrepo.OrderRepository) *GetOrderUseCase {
 
 func (uc *GetOrderUseCase) Execute(ctx context.Context, orderID string) (*dto.GetOrderResponse, error) {
 	if orderID == "" {
-		return nil, fmt.Errorf("order id cannot be empty")
+		return nil, apperrors.NewValidationError("ORDER_ID_REQUIRED", "order id cannot be empty")
 	}
 
 	order, err := uc.repo.GetByID(ctx, orderID)
