@@ -25,13 +25,13 @@ func setupTestDB(t *testing.T) database.Database {
 
 	db, err := database.NewPostgresDatabase(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("failed to connect to database: %v", err)
+		t.Skipf("skipping integration test: could not connect to database: %v", err)
 	}
 
 	// Test ping
 	if err := db.Ping(context.Background()); err != nil {
 		db.Close()
-		t.Fatalf("failed to ping database: %v", err)
+		t.Skipf("skipping integration test: database not reachable: %v", err)
 	}
 
 	return db
