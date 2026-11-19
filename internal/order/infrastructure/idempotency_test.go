@@ -33,7 +33,7 @@ func orderTestRouter(db database.Database) *gin.Engine {
 	repo := NewPostgresOrderRepository(db)
 	mockPublisher := &mockEventPublisher{}
 	logger := zap.NewNop()
-	h := handler.NewOrderHandler(usecase.NewCreateOrderUseCase(repo), usecase.NewGetOrderUseCase(repo), mockPublisher, logger)
+	h := handler.NewOrderHandler(usecase.NewCreateOrderUseCase(repo, mockPublisher, logger), usecase.NewGetOrderUseCase(repo), logger)
 	r := gin.New()
 	r.POST("/orders", h.CreateOrder)
 	r.GET("/orders/:id", h.GetOrder)

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"microservice/internal/order/application/dto"
 	"microservice/internal/order/application/usecase"
-	"microservice/internal/order/domain/event"
-	"microservice/internal/order/infrastructure/eventpublisher"
 	"microservice/pkg/apperrors"
 	"microservice/pkg/httputil"
 	"net/http"
@@ -17,18 +15,16 @@ import (
 )
 
 type OrderHandler struct {
-	createOrderUC  *usecase.CreateOrderUseCase
-	getOrderUC     *usecase.GetOrderUseCase
-	eventPublisher eventpublisher.Publisher
-	log            *zap.Logger
+	createOrderUC *usecase.CreateOrderUseCase
+	getOrderUC    *usecase.GetOrderUseCase
+	log           *zap.Logger
 }
 
-func NewOrderHandler(createOrderUC *usecase.CreateOrderUseCase, getOrderUC *usecase.GetOrderUseCase, eventPublisher eventpublisher.Publisher, log *zap.Logger) *OrderHandler {
+func NewOrderHandler(createOrderUC *usecase.CreateOrderUseCase, getOrderUC *usecase.GetOrderUseCase, log *zap.Logger) *OrderHandler {
 	return &OrderHandler{
-		createOrderUC:  createOrderUC,
-		getOrderUC:     getOrderUC,
-		eventPublisher: eventPublisher,
-		log:            log,
+		createOrderUC: createOrderUC,
+		getOrderUC:    getOrderUC,
+		log:           log,
 	}
 }
 
@@ -71,18 +67,6 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	if err != nil {
 		h.respondError(c, err)
 		return
-	}
-
-	// Publish OrderCreated event after successful creation
-	// Note: If this publication fails, the order is already persisted
-	evt := event.NewOrderCreated(res.ID, req.CustomerID, calculateTotalAmount(&req))
-	if err := h.eventPublisher.PublishOrderCreated(c.Request.Context(), evt); err != nil {
-		h.log.Error("Failed to publish order created event, but order was persisted",
-			zap.String("order_id", res.ID),
-			zap.Error(err),
-		)
-		// Still return 201 because the order was successfully created
-		// The event publication failure is logged for later investigation
 	}
 
 	c.JSON(http.StatusCreated, res)
@@ -128,14 +112,6 @@ func validateCreateOrderRequest(req *dto.CreateOrderRequest) error {
 	}
 
 	return nil
-}
-
-func calculateTotalAmount(req *dto.CreateOrderRequest) float64 {
-	total := 0.0
-	for _, item := range req.Items {
-		total += float64(item.UnitPrice) * float64(item.Quantity)
-	}
-	return total
 }
 
 // @Summary Get Order

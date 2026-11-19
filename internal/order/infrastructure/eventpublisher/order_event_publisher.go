@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"microservice/cmd/config"
+	"microservice/internal/order/application/port"
 	"microservice/internal/order/domain/event"
 	"microservice/pkg/amqp"
 
@@ -12,9 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type Publisher interface {
-	PublishOrderCreated(ctx context.Context, evt *event.OrderCreated) error
-}
+var _ port.OrderCreatedPublisher = (*OrderEventPublisher)(nil)
 
 type OrderEventPublisher struct {
 	client *amqp.Client

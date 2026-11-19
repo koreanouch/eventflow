@@ -8,6 +8,7 @@ import (
 
 	"microservice/internal/order/application/dto"
 	"microservice/internal/order/domain/entity"
+	"microservice/internal/order/domain/event"
 	"microservice/internal/order/domain/repository"
 )
 
@@ -49,9 +50,29 @@ func (m *mockOrderRepository) GetByID(ctx context.Context, id string) (*entity.O
 	return nil, nil
 }
 
+type mockEventPublisher struct {
+	published []*event.OrderCreated
+	err       error
+}
+
+func (m *mockEventPublisher) PublishOrderCreated(ctx context.Context, evt *event.OrderCreated) error {
+	m.published = append(m.published, evt)
+	return m.err
+}
+
+func validCreateOrderRequest() *dto.CreateOrderRequest {
+	return &dto.CreateOrderRequest{
+		CustomerID: "cust-123",
+		Items: []dto.OrderItemDTO{
+			{ProductID: "prod-1", Quantity: 2, UnitPrice: 1000},
+			{ProductID: "prod-2", Quantity: 1, UnitPrice: 500},
+		},
+	}
+}
+
 func TestCreateOrderUseCase_Execute_Success(t *testing.T) {
 	mockRepo := newMockOrderRepository()
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	req := &dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -112,7 +133,7 @@ func TestCreateOrderUseCase_Execute_Success(t *testing.T) {
 
 func TestCreateOrderUseCase_Execute_NilRequest(t *testing.T) {
 	mockRepo := newMockOrderRepository()
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	res, err := uc.Execute(context.Background(), nil, "test-key")
 
@@ -126,7 +147,7 @@ func TestCreateOrderUseCase_Execute_NilRequest(t *testing.T) {
 }
 
 func TestCreateOrderUseCase_RequiresIdempotencyKey(t *testing.T) {
-	uc := NewCreateOrderUseCase(newMockOrderRepository())
+	uc := NewCreateOrderUseCase(newMockOrderRepository(), nil, nil)
 	req := &dto.CreateOrderRequest{
 		CustomerID: "cust",
 		Items:      []dto.OrderItemDTO{{ProductID: "prod", Quantity: 1, UnitPrice: 1}},
@@ -140,7 +161,7 @@ func TestCreateOrderUseCase_RequiresIdempotencyKey(t *testing.T) {
 
 func TestCreateOrderUseCase_Execute_EmptyCustomerID(t *testing.T) {
 	mockRepo := newMockOrderRepository()
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	req := &dto.CreateOrderRequest{
 		CustomerID: "",
@@ -166,7 +187,7 @@ func TestCreateOrderUseCase_Execute_EmptyCustomerID(t *testing.T) {
 
 func TestCreateOrderUseCase_Execute_NoItems(t *testing.T) {
 	mockRepo := newMockOrderRepository()
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	req := &dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -186,7 +207,7 @@ func TestCreateOrderUseCase_Execute_NoItems(t *testing.T) {
 
 func TestCreateOrderUseCase_Execute_InvalidItem(t *testing.T) {
 	mockRepo := newMockOrderRepository()
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	req := &dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -214,7 +235,7 @@ func TestCreateOrderUseCase_Execute_RepositoryError(t *testing.T) {
 	mockRepo := newMockOrderRepository()
 	mockRepo.saveErr = errors.New("database error")
 
-	uc := NewCreateOrderUseCase(mockRepo)
+	uc := NewCreateOrderUseCase(mockRepo, nil, nil)
 
 	req := &dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -236,6 +257,114 @@ func TestCreateOrderUseCase_Execute_RepositoryError(t *testing.T) {
 	if res != nil {
 		t.Fatalf("Execute() expected nil response on repository error")
 	}
+}
+
+func TestCreateOrderUseCase_PublishesEventFromDomainAggregate(t *testing.T) {
+	mockRepo := newMockOrderRepository()
+	mockPublisher := &mockEventPublisher{}
+	uc := NewCreateOrderUseCase(mockRepo, mockPublisher, nil)
+
+	res, err := uc.Execute(context.Background(), validCreateOrderRequest(), "test-key")
+	if err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+
+	if len(mockPublisher.published) != 1 {
+		t.Fatalf("published %d events, want 1", len(mockPublisher.published))
+	}
+
+	evt := mockPublisher.published[0]
+	if evt.EventID != "order.created."+res.ID {
+		t.Errorf("EventID = %q, want event tied to persisted order %q", evt.EventID, res.ID)
+	}
+	if evt.EventType != "order.created" {
+		t.Errorf("EventType = %q, want order.created", evt.EventType)
+	}
+	if evt.OrderID != res.ID {
+		t.Errorf("OrderID = %q, want persisted ID %q", evt.OrderID, res.ID)
+	}
+	if evt.CustomerID != "cust-123" {
+		t.Errorf("CustomerID = %q, want cust-123", evt.CustomerID)
+	}
+	if evt.TotalAmount != 2500 {
+		t.Errorf("TotalAmount = %d, want 2500 (domain total)", evt.TotalAmount)
+	}
+	if evt.Timestamp.IsZero() {
+		t.Error("Timestamp is zero")
+	}
+}
+
+func TestCreateOrderUseCase_PublishFailureDoesNotFailRequest(t *testing.T) {
+	mockRepo := newMockOrderRepository()
+	mockPublisher := &mockEventPublisher{err: errors.New("broker down")}
+	uc := NewCreateOrderUseCase(mockRepo, mockPublisher, nil)
+
+	res, err := uc.Execute(context.Background(), validCreateOrderRequest(), "test-key")
+	if err != nil {
+		t.Fatalf("Execute() must not fail when only publication fails: %v", err)
+	}
+	if res == nil {
+		t.Fatal("Execute() returned nil response")
+	}
+	if _, err := mockRepo.GetByID(context.Background(), res.ID); err != nil {
+		t.Fatalf("order was not persisted: %v", err)
+	}
+}
+
+func TestCreateOrderUseCase_DoesNotPublishWhenPersistenceFails(t *testing.T) {
+	mockRepo := newMockOrderRepository()
+	mockRepo.saveErr = errors.New("database error")
+	mockPublisher := &mockEventPublisher{}
+	uc := NewCreateOrderUseCase(mockRepo, mockPublisher, nil)
+
+	if _, err := uc.Execute(context.Background(), validCreateOrderRequest(), "test-key"); err == nil {
+		t.Fatal("Execute() expected error when persistence fails")
+	}
+	if len(mockPublisher.published) != 0 {
+		t.Fatalf("published %d events after failed persistence, want 0", len(mockPublisher.published))
+	}
+}
+
+func TestCreateOrderUseCase_ReplayEventReferencesPersistedOrder(t *testing.T) {
+	persisted := repository.CreatedOrder{
+		ID:        "existing-order",
+		Status:    "pending",
+		CreatedAt: time.Now().UTC(),
+	}
+	repo := &replayOrderRepository{persisted: persisted}
+	mockPublisher := &mockEventPublisher{}
+	uc := NewCreateOrderUseCase(repo, mockPublisher, nil)
+
+	res, err := uc.Execute(context.Background(), validCreateOrderRequest(), "replayed-key")
+	if err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if res.ID != "existing-order" {
+		t.Fatalf("response ID = %q, want persisted order", res.ID)
+	}
+	if len(mockPublisher.published) != 1 {
+		t.Fatalf("published %d events, want 1", len(mockPublisher.published))
+	}
+	if got := mockPublisher.published[0].OrderID; got != "existing-order" {
+		t.Errorf("event OrderID = %q, want persisted order ID", got)
+	}
+	if got := mockPublisher.published[0].EventID; got != "order.created.existing-order" {
+		t.Errorf("event EventID = %q, want stable ID of the persisted order", got)
+	}
+}
+
+type replayOrderRepository struct {
+	persisted repository.CreatedOrder
+}
+
+func (r *replayOrderRepository) Save(ctx context.Context, order *entity.Order) error { return nil }
+
+func (r *replayOrderRepository) SaveIdempotent(ctx context.Context, order *entity.Order, key string, hash [32]byte) (repository.CreatedOrder, error) {
+	return r.persisted, nil
+}
+
+func (r *replayOrderRepository) GetByID(ctx context.Context, id string) (*entity.Order, error) {
+	return nil, nil
 }
 
 func TestGetOrderUseCase_Execute_Success(t *testing.T) {

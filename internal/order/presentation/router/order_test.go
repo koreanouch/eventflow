@@ -70,11 +70,11 @@ func TestRegisterRoutes_POST_Success(t *testing.T) {
 	api := router.Group("api")
 
 	mockRepo := newMockOrderRepository()
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	orderHandler := handler.NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	orderHandler := handler.NewOrderHandler(createUC, getUC, logger)
 
 	RegisterRoutes(api, orderHandler)
 
@@ -121,11 +121,11 @@ func TestRegisterRoutes_GET_Success(t *testing.T) {
 	order, _ := entity.NewOrder("order-123", "cust-456", []entity.OrderItem{item})
 	_ = mockRepo.Save(context.Background(), order)
 
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	orderHandler := handler.NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	orderHandler := handler.NewOrderHandler(createUC, getUC, logger)
 
 	RegisterRoutes(api, orderHandler)
 
@@ -152,11 +152,11 @@ func TestRegisterRoutes_GET_NotFound(t *testing.T) {
 	api := router.Group("api")
 
 	mockRepo := newMockOrderRepository()
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	orderHandler := handler.NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	orderHandler := handler.NewOrderHandler(createUC, getUC, logger)
 
 	RegisterRoutes(api, orderHandler)
 

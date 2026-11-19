@@ -40,7 +40,7 @@ func TestProcessOrderCreatedEvent_Success(t *testing.T) {
 	proc := processor.NewEventProcessor(db, log)
 
 	// Create a test event
-	evt := event.NewOrderCreated("order-123", "customer-456", 100.50)
+	evt := event.NewOrderCreated("order-123", "customer-456", 10050)
 
 	// Process the event
 	err := proc.ProcessOrderCreated(context.Background(), evt, "test-worker")
@@ -83,7 +83,7 @@ func TestProcessOrderCreatedEvent_Idempotency(t *testing.T) {
 	proc := processor.NewEventProcessor(db, log)
 
 	// Create a test event
-	evt := event.NewOrderCreated("order-789", "customer-999", 200.75)
+	evt := event.NewOrderCreated("order-789", "customer-999", 20075)
 
 	// Process the event twice
 	err := proc.ProcessOrderCreated(context.Background(), evt, "test-worker")
@@ -136,7 +136,7 @@ func TestParseOrderCreatedEvent(t *testing.T) {
 		"timestamp": "2024-01-15T10:30:00Z",
 		"order_id": "test-order-001",
 		"customer_id": "test-customer-001",
-		"total_amount": 150.50
+		"total_amount": 15050
 	}`)
 
 	evt, err := proc.ParseOrderCreatedEvent(body)
@@ -152,8 +152,8 @@ func TestParseOrderCreatedEvent(t *testing.T) {
 		t.Fatalf("Expected customer_id 'test-customer-001', got %s", evt.CustomerID)
 	}
 
-	if evt.TotalAmount != 150.50 {
-		t.Fatalf("Expected total_amount 150.50, got %f", evt.TotalAmount)
+	if evt.TotalAmount != 15050 {
+		t.Fatalf("Expected total_amount 15050, got %d", evt.TotalAmount)
 	}
 }
 
@@ -173,6 +173,11 @@ func setupTestDatabase(t *testing.T) database.Database {
 
 	if err != nil {
 		t.Skipf("Skipping integration test: could not connect to database: %v", err)
+	}
+
+	if err := db.Native().(*pgxpool.Pool).Ping(ctx); err != nil {
+		db.Close()
+		t.Skipf("Skipping integration test: database not reachable: %v", err)
 	}
 
 	return db

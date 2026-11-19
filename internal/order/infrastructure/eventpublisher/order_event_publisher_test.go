@@ -48,7 +48,7 @@ func TestPublishOrderCreatedEvent_WithConfirm(t *testing.T) {
 	publisher := eventpublisher.NewOrderEventPublisher(client, cfg, log)
 
 	// Create event
-	evt := event.NewOrderCreated("test-order-001", "test-customer-001", 100.00)
+	evt := event.NewOrderCreated("test-order-001", "test-customer-001", 10000)
 
 	// Publish event with context timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -128,7 +128,7 @@ func TestPublishOrderCreatedEvent_ContextTimeout(t *testing.T) {
 	}
 
 	publisher := eventpublisher.NewOrderEventPublisher(client, cfg, log)
-	evt := event.NewOrderCreated("test-order-timeout", "test-customer-001", 100.00)
+	evt := event.NewOrderCreated("test-order-timeout", "test-customer-001", 10000)
 
 	// Use very short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
@@ -146,7 +146,7 @@ func TestPublishOrderCreatedEvent_ContextTimeout(t *testing.T) {
 
 func TestOrderCreatedEventJSON(t *testing.T) {
 	// Create event
-	evt := event.NewOrderCreated("test-order-123", "customer-456", 250.75)
+	evt := event.NewOrderCreated("test-order-123", "customer-456", 25075)
 
 	// Marshal to JSON
 	body, err := json.Marshal(evt)
@@ -169,8 +169,8 @@ func TestOrderCreatedEventJSON(t *testing.T) {
 		t.Fatalf("Expected customer_id 'customer-456', got %s", evt2.CustomerID)
 	}
 
-	if evt2.TotalAmount != 250.75 {
-		t.Fatalf("Expected total_amount 250.75, got %f", evt2.TotalAmount)
+	if evt2.TotalAmount != 25075 {
+		t.Fatalf("Expected total_amount 25075, got %d", evt2.TotalAmount)
 	}
 
 	// Verify event ID is stable

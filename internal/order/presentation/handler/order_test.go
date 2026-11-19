@@ -30,9 +30,11 @@ type mockOrderRepository struct {
 
 type mockEventPublisher struct {
 	publishErr error
+	events     []*event.OrderCreated
 }
 
 func (m *mockEventPublisher) PublishOrderCreated(ctx context.Context, evt *event.OrderCreated) error {
+	m.events = append(m.events, evt)
 	return m.publishErr
 }
 
@@ -70,11 +72,11 @@ func (m *mockOrderRepository) GetByID(ctx context.Context, id string) (*entity.O
 func TestCreateOrder_Success(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	req := dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -123,13 +125,81 @@ func TestCreateOrder_Success(t *testing.T) {
 	}
 }
 
+func TestCreateOrder_PublishesEventFromUseCase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockRepo := newMockOrderRepository()
+	mockPublisher := &mockEventPublisher{}
+	h := NewOrderHandler(
+		usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop()),
+		usecase.NewGetOrderUseCase(mockRepo),
+		zap.NewNop(),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/orders", bytes.NewBufferString(
+		`{"customer_id":"cust-123","items":[{"product_id":"prod-1","quantity":2,"unit_price":1000}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	h.CreateOrder(c)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", w.Code, w.Body.String())
+	}
+
+	var res dto.CreateOrderResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("invalid response: %v", err)
+	}
+
+	if len(mockPublisher.events) != 1 {
+		t.Fatalf("published %d events, want 1", len(mockPublisher.events))
+	}
+	evt := mockPublisher.events[0]
+	if evt.OrderID != res.ID || evt.EventID != "order.created."+res.ID {
+		t.Errorf("event references order %q/%q, want persisted order %q", evt.OrderID, evt.EventID, res.ID)
+	}
+	if evt.TotalAmount != 2000 {
+		t.Errorf("TotalAmount = %d, want 2000", evt.TotalAmount)
+	}
+}
+
+func TestCreateOrder_PublishFailureStillReturns201(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mockRepo := newMockOrderRepository()
+	mockPublisher := &mockEventPublisher{publishErr: errors.New("broker down")}
+	h := NewOrderHandler(
+		usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop()),
+		usecase.NewGetOrderUseCase(mockRepo),
+		zap.NewNop(),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/orders", bytes.NewBufferString(
+		`{"customer_id":"cust-123","items":[{"product_id":"prod-1","quantity":1,"unit_price":100}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	h.CreateOrder(c)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 even when publication fails: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "broker down") {
+		t.Errorf("response leaked publication error: %s", w.Body.String())
+	}
+}
+
 func TestCreateOrder_PayloadTooLarge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
 	handler := NewOrderHandler(
-		usecase.NewCreateOrderUseCase(mockRepo),
+		usecase.NewCreateOrderUseCase(mockRepo, &mockEventPublisher{}, zap.NewNop()),
 		usecase.NewGetOrderUseCase(mockRepo),
-		&mockEventPublisher{},
 		zap.NewNop(),
 	)
 
@@ -153,11 +223,11 @@ func TestCreateOrder_PayloadTooLarge(t *testing.T) {
 func TestCreateOrder_InvalidRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	// Missing customer_id
 	req := `{"items": [{"product_id": "prod-1", "quantity": 1, "unit_price": 100}]}`
@@ -181,11 +251,11 @@ func TestCreateOrder_InternalError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
 	mockRepo.saveErr = errors.New("database error")
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	req := dto.CreateOrderRequest{
 		CustomerID: "cust-123",
@@ -236,7 +306,7 @@ func TestCreateOrder_IdempotencyKey(t *testing.T) {
 			repo.saveErr = tc.repoErr
 			mockPublisher := &mockEventPublisher{}
 			logger := zap.NewNop()
-			h := NewOrderHandler(usecase.NewCreateOrderUseCase(repo), usecase.NewGetOrderUseCase(repo), mockPublisher, logger)
+			h := NewOrderHandler(usecase.NewCreateOrderUseCase(repo, mockPublisher, zap.NewNop()), usecase.NewGetOrderUseCase(repo), logger)
 			req := httptest.NewRequest(http.MethodPost, "/orders", bytes.NewBufferString(
 				`{"customer_id":"cust","items":[{"product_id":"prod","quantity":1,"unit_price":100}]}`))
 			req.Header.Set("Content-Type", "application/json")
@@ -272,11 +342,11 @@ func TestGetOrder_Success(t *testing.T) {
 	order, _ := entity.NewOrder("order-123", "cust-456", []entity.OrderItem{item})
 	_ = mockRepo.Save(context.Background(), order)
 
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/orders/order-123", nil)
 	w := httptest.NewRecorder()
@@ -318,11 +388,11 @@ func TestGetOrder_Success(t *testing.T) {
 func TestGetOrder_NotFound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/orders/nonexistent", nil)
 	w := httptest.NewRecorder()
@@ -351,11 +421,11 @@ func TestGetOrder_InternalError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mockRepo := newMockOrderRepository()
 	mockRepo.getByIDErr = errors.New("database connection error")
-	createUC := usecase.NewCreateOrderUseCase(mockRepo)
-	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	mockPublisher := &mockEventPublisher{}
+	createUC := usecase.NewCreateOrderUseCase(mockRepo, mockPublisher, zap.NewNop())
+	getUC := usecase.NewGetOrderUseCase(mockRepo)
 	logger := zap.NewNop()
-	handler := NewOrderHandler(createUC, getUC, mockPublisher, logger)
+	handler := NewOrderHandler(createUC, getUC, logger)
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/orders/order-123", nil)
 	w := httptest.NewRecorder()

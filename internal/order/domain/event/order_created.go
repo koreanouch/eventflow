@@ -11,10 +11,10 @@ type OrderCreated struct {
 	Timestamp   time.Time `json:"timestamp"`
 	OrderID     string    `json:"order_id"`
 	CustomerID  string    `json:"customer_id"`
-	TotalAmount float64   `json:"total_amount"`
+	TotalAmount int64     `json:"total_amount"`
 }
 
-func NewOrderCreated(orderID, customerID string, totalAmount float64) *OrderCreated {
+func NewOrderCreated(orderID, customerID string, totalAmount int64) *OrderCreated {
 	return &OrderCreated{
 		EventID:     fmt.Sprintf("order.created.%s", orderID),
 		EventType:   "order.created",

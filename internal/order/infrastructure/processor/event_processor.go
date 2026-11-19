@@ -82,7 +82,7 @@ func (ep *EventProcessor) ProcessOrderCreated(ctx context.Context, evt *event.Or
 	}
 
 	// Create notification record
-	message := fmt.Sprintf("Order %s created for customer %s with total amount $%.2f",
+	message := fmt.Sprintf("Order %s created for customer %s with total amount %d",
 		evt.OrderID, evt.CustomerID, evt.TotalAmount)
 
 	_, err = tx.Exec(

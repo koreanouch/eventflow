@@ -7,20 +7,28 @@ import (
 	"errors"
 	"fmt"
 	"microservice/internal/order/application/dto"
+	"microservice/internal/order/application/port"
 	"microservice/internal/order/domain/entity"
+	"microservice/internal/order/domain/event"
 	domainrepo "microservice/internal/order/domain/repository"
 	"microservice/pkg/apperrors"
 	"strings"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type CreateOrderUseCase struct {
-	repo domainrepo.OrderRepository
+	repo      domainrepo.OrderRepository
+	publisher port.OrderCreatedPublisher
+	log       *zap.Logger
 }
 
-func NewCreateOrderUseCase(repo domainrepo.OrderRepository) *CreateOrderUseCase {
-	return &CreateOrderUseCase{repo: repo}
+func NewCreateOrderUseCase(repo domainrepo.OrderRepository, publisher port.OrderCreatedPublisher, log *zap.Logger) *CreateOrderUseCase {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	return &CreateOrderUseCase{repo: repo, publisher: publisher, log: log}
 }
 
 func (uc *CreateOrderUseCase) Execute(ctx context.Context, req *dto.CreateOrderRequest, key string) (*dto.CreateOrderResponse, error) {
@@ -81,5 +89,26 @@ func (uc *CreateOrderUseCase) Execute(ctx context.Context, req *dto.CreateOrderR
 		return nil, fmt.Errorf("failed to save order: %w", err)
 	}
 
+	uc.publishOrderCreated(ctx, persisted.ID, order.CustomerID(), order.TotalAmount())
+
 	return dto.NewCreateOrderResponse(persisted.ID, persisted.Status, persisted.CreatedAt), nil
+}
+
+// publishOrderCreated construye el evento a partir del agregado de dominio (no del
+// DTO de transporte) y lo publica. Un fallo de publicación no revierte el pedido:
+// queda registrado en logs y el reintento del cliente con la misma clave vuelve a
+// publicar el evento. Para cobertura de extremo a extremo se propone Outbox.
+func (uc *CreateOrderUseCase) publishOrderCreated(ctx context.Context, orderID, customerID string, totalAmount int64) {
+	if uc.publisher == nil {
+		return
+	}
+
+	evt := event.NewOrderCreated(orderID, customerID, totalAmount)
+	if err := uc.publisher.PublishOrderCreated(ctx, evt); err != nil {
+		uc.log.Error("order persisted but event publication failed",
+			zap.String("order_id", orderID),
+			zap.String("event_id", evt.EventID),
+			zap.Error(err),
+		)
+	}
 }
