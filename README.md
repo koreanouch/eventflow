@@ -92,7 +92,7 @@ flowchart TD
 2. La API recibe y valida el contenido de la solicitud.
 3. Se verifica la clave `Idempotency-Key`.
 4. El caso de uso aplica las reglas de negocio y registra la orden.
-5. La API construye el evento `OrderCreated`.
+5. El caso de uso construye el evento `OrderCreated` a partir del agregado persistido.
 6. El publicador envía el evento a RabbitMQ.
 7. El worker consume el mensaje.
 8. El procesador registra el evento procesado y genera la notificación.
@@ -326,6 +326,9 @@ Además, la API aplica límites de entrada configurables por entorno:
 |---|---|---|
 | `REQUEST_TIMEOUT_SECONDS` | `10` | Deadline máximo por petición HTTP (incluye queries y publicación de eventos) |
 | `MAX_BODY_BYTES` | `1048576` | Tamaño máximo del cuerpo de la petición |
+| `WORKER_PROCESSING_TIMEOUT_SECONDS` | `30` | Deadline máximo para procesar un mensaje en el worker |
+| `RABBITMQ_RETRY_DELAY_MS` | `5000` | Espera base del primer reintento |
+| `RABBITMQ_MAX_RETRY_DELAY_MS` | `60000` | Tope de la espera con backoff exponencial |
 
 Los archivos de entorno locales, como `.env.dev` y `.env.qa`, no deben publicarse en el repositorio.
 
@@ -478,27 +481,30 @@ RabbitMQ permite desacoplar la creación de órdenes del procesamiento posterior
 | Exchange | `orders.exchange` |
 | Tipo | `topic` |
 | Cola principal | `orders` |
-| Cola de reintentos | `orders.retry` |
+| Cola de reintentos | `orders.retry.1`, `orders.retry.2`, `orders.retry.3` |
 | Dead Letter Queue | `orders.dlq` |
 | Routing key | `order.created` |
 
 Las colas se configuran como durables.
 
-La cola de reintentos utiliza un TTL de 5000 milisegundos y una configuración de Dead Letter Exchange para devolver los mensajes al flujo correspondiente después del tiempo de espera.
+Cada intento usa una cola de reintentos distinta (`RABBITMQ_QUEUE_ORDERS_RETRY` + número de intento) con su propio TTL, de modo que la espera crece de forma exponencial: 5000 ms, 10000 ms y 20000 ms con los valores por defecto. `RABBITMQ_RETRY_DELAY_MS` define la espera base y `RABBITMQ_MAX_RETRY_DELAY_MS` el máximo. Tras el TTL, el Dead Letter Exchange devuelve el mensaje a la cola principal.
 
 ### Evento OrderCreated
 
-Al crear una orden se construye un evento que contiene la información necesaria para que el worker procese la operación.
-
-Ejemplo conceptual:
+Al crear una orden se construye un evento de dominio a partir del agregado persistido (no del DTO HTTP), con importes enteros. Ejemplo:
 
 ```json
 {
   "event_id": "order.created.799207fe-4e4e-4ced-b0ca-454fe7391efd",
-  "event_type": "OrderCreated",
-  "order_id": "799207fe-4e4e-4ced-b0ca-454fe7391efd"
+  "event_type": "order.created",
+  "timestamp": "2026-11-19T10:30:00Z",
+  "order_id": "799207fe-4e4e-4ced-b0ca-454fe7391efd",
+  "customer_id": "customer-001",
+  "total_amount": 10000
 }
 ```
+
+El evento se publica desde el caso de uso. Si la publicación falla después de persistir el pedido, la API responde `201` igualmente y registra el error; un reintento del cliente con la misma `Idempotency-Key` vuelve a publicar el evento (el `event_id` es estable y el consumidor es idempotente).
 
 ### Worker
 
@@ -513,7 +519,14 @@ Sus responsabilidades son:
 5. Generar las notificaciones correspondientes.
 6. Confirmar los mensajes procesados correctamente.
 
-El consumidor utiliza ACK manual y QoS para limitar la cantidad de mensajes entregados simultáneamente.
+El consumidor utiliza ACK manual y QoS para limitar la cantidad de mensajes entregados simultáneamente. Cada mensaje se procesa con un deadline propio (`WORKER_PROCESSING_TIMEOUT_SECONDS`, 30 s por defecto): si se agota, el procesamiento se considera fallido y el mensaje entra en el flujo de reintentos. La publicación en las colas de reintento o en la DLQ usa un contexto independiente del deadline de procesamiento.
+
+Política de confirmación:
+
+- `ACK` solo cuando el procesamiento terminó correctamente o el mensaje quedó registrado en la DLQ.
+- `NACK` con `requeue` si no se pudo publicar el reintento, para no perder el mensaje.
+- `NACK` sin `requeue` para mensajes malformados que tampoco pudieron enviarse a la DLQ.
+- Los duplicados se detectan por `event_id` + `consumer_name` en `processed_events`.
 
 ### Publisher Confirms
 
@@ -529,7 +542,7 @@ Cuando ocurre un error durante el procesamiento, el sistema contempla mecanismos
 
 El objetivo es evitar perder inmediatamente un mensaje que no pudo procesarse y permitir aislar los mensajes que agotan los intentos configurados.
 
-La configuración contempla hasta tres reintentos, según los parámetros de implementación.
+La configuración contempla hasta tres reintentos. Cada reintento se publica en una cola con TTL creciente (`orders.retry.1`, `orders.retry.2`, `orders.retry.3`), por lo que la espera no es fija. La cabecera `x-retry-count` registra el intento y, al superar `RABBITMQ_MAX_RETRIES`, el mensaje se publica en `orders.dlq` con la cabecera `x-dead-letter-reason`.
 
 La estrategia de reintentos y DLQ debe considerarse junto con la idempotencia del procesamiento para evitar efectos duplicados.
 
@@ -546,6 +559,11 @@ El proyecto implementa distintos mecanismos para mejorar la confiabilidad:
 - Reintentos y Dead Letter Queue.
 - Persistencia de eventos procesados.
 - Cierre controlado de procesos.
+- Arranque de la API en modo degradado si RabbitMQ no está disponible.
+
+### API con el broker no disponible
+
+La API no depende de RabbitMQ para arrancar. Si la conexión o la declaración de colas falla, el servicio registra el error y arranca en modo degradado: `POST /orders` sigue persistiendo pedidos, `GET /orders/{id}` y los healthchecks funcionan, y la publicación de eventos se omite dejando constancia en los logs. El worker, en cambio, sí requiere el broker para consumir.
 
 ### Limitación: publicación después de persistir
 
@@ -570,7 +588,7 @@ No se implementó en esta versión porque se priorizó mantener el alcance y la 
 - Profundizar las pruebas de concurrencia del publicador.
 - Mejorar la observabilidad y las métricas operacionales.
 - Incorporar Outbox para resolver la brecha entre persistencia y publicación.
-- Evaluar la operación de la API sin RabbitMQ como dependencia obligatoria.
+- Añadir correlación (`request_id`) extremo a extremo entre API y worker.
 
 ## 13. Pruebas
 

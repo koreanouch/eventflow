@@ -86,32 +86,38 @@ func (qm *QueueManager) SetupOrderQueues(ctx context.Context) error {
 		return fmt.Errorf("failed to declare retry exchange: %w", err)
 	}
 
-	// Declare retry queue with TTL and dead-letter to main queue via DLX
-	retryArgs := amqp.Table{
-		"x-dead-letter-exchange":    qm.cfg.RabbitMQExchange + ".dlx",
-		"x-dead-letter-routing-key": qm.cfg.RabbitMQRoutingKey,
-		"x-message-ttl":             int64(qm.cfg.RabbitMQRetryDelayMs),
-	}
-	if _, err := qm.channel.QueueDeclare(
-		qm.cfg.RabbitMQQueueRetry,
-		true,
-		false,
-		false,
-		false,
-		retryArgs,
-	); err != nil {
-		return fmt.Errorf("failed to declare retry queue: %w", err)
-	}
+	// Declare one retry queue per attempt. Each queue has its own TTL, so the
+	// wait grows exponentially instead of staying fixed at a single delay.
+	for attempt := 1; attempt <= qm.cfg.RabbitMQMaxRetries; attempt++ {
+		retryQueue := RetryQueueName(qm.cfg.RabbitMQQueueRetry, attempt)
+		delayMs := RetryDelayMs(qm.cfg.RabbitMQRetryDelayMs, qm.cfg.RabbitMQMaxRetryDelayMs, attempt)
 
-	// Bind retry queue to retry exchange
-	if err := qm.channel.QueueBind(
-		qm.cfg.RabbitMQQueueRetry,
-		qm.cfg.RabbitMQQueueRetry,
-		qm.cfg.RabbitMQExchange+".retry",
-		false,
-		nil,
-	); err != nil {
-		return fmt.Errorf("failed to bind retry queue: %w", err)
+		retryArgs := amqp.Table{
+			"x-dead-letter-exchange":    qm.cfg.RabbitMQExchange + ".dlx",
+			"x-dead-letter-routing-key": qm.cfg.RabbitMQRoutingKey,
+			"x-message-ttl":             int64(delayMs),
+		}
+		if _, err := qm.channel.QueueDeclare(
+			retryQueue,
+			true,
+			false,
+			false,
+			false,
+			retryArgs,
+		); err != nil {
+			return fmt.Errorf("failed to declare retry queue %s: %w", retryQueue, err)
+		}
+
+		// Bind retry queue to retry exchange using its own name as routing key
+		if err := qm.channel.QueueBind(
+			retryQueue,
+			retryQueue,
+			qm.cfg.RabbitMQExchange+".retry",
+			false,
+			nil,
+		); err != nil {
+			return fmt.Errorf("failed to bind retry queue %s: %w", retryQueue, err)
+		}
 	}
 
 	// Bind DLX to main queue
@@ -150,9 +156,11 @@ func (qm *QueueManager) SetupOrderQueues(ctx context.Context) error {
 
 	qm.log.Info("Order queues setup completed",
 		zap.String("main_queue", qm.cfg.RabbitMQQueueOrders),
-		zap.String("retry_queue", qm.cfg.RabbitMQQueueRetry),
+		zap.String("retry_queue_base", qm.cfg.RabbitMQQueueRetry),
 		zap.String("dlq", qm.cfg.RabbitMQQueueDLQ),
-		zap.String("retry_delay_ms", fmt.Sprintf("%d", qm.cfg.RabbitMQRetryDelayMs)),
+		zap.Int("retry_queues", qm.cfg.RabbitMQMaxRetries),
+		zap.Int("retry_delay_ms", qm.cfg.RabbitMQRetryDelayMs),
+		zap.Int("retry_max_delay_ms", qm.cfg.RabbitMQMaxRetryDelayMs),
 	)
 
 	return nil

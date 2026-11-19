@@ -106,6 +106,12 @@ func main() {
 	// Channel to signal processing goroutine to stop
 	stopProcessing := make(chan struct{})
 
+	// Root context for in-flight work. It is cancelled only after the graceful
+	// drain window, so a deadline-exceeded request cannot orphan retry/DLQ
+	// bookkeeping (those use a context independent of the message deadline).
+	processingCtx, cancelProcessing := context.WithCancel(context.Background())
+	defer cancelProcessing()
+
 	// Message processing loop
 	go func() {
 		for {
@@ -116,7 +122,12 @@ func main() {
 					return
 				}
 				atomic.AddInt32(&processingCount, 1)
-				handleMessage(context.Background(), delivery, eventProcessor, amqpClient, cfg, log)
+				msgCtx, cancelMsg := context.WithTimeout(
+					processingCtx,
+					time.Duration(cfg.WorkerProcessingTimeoutSeconds)*time.Second,
+				)
+				handleMessage(msgCtx, delivery, eventProcessor, amqpClient, cfg, log)
+				cancelMsg()
 				atomic.AddInt32(&processingCount, -1)
 			case <-stopProcessing:
 				log.Info("Stopped processing new messages")
@@ -146,18 +157,29 @@ func main() {
 			break
 		}
 		if time.Now().After(deadline) {
-			log.Warn("Shutdown timeout exceeded, some messages may not have been processed",
+			log.Warn("Shutdown timeout exceeded, aborting in-flight work",
 				zap.Int32("processing_count", atomic.LoadInt32(&processingCount)),
 			)
+			cancelProcessing()
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	cancelProcessing()
+
 	log.Info("Worker shutdown completed")
 }
 
 func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *processor.EventProcessor, amqpClient *amqp.Client, cfg *config.Configuration, log *zap.Logger) {
+	// Retry/DLQ publishing must not inherit the processing deadline: if the
+	// event timed out, the original context is already expired.
+	publishCtx, cancelPublish := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		time.Duration(cfg.RequestTimeoutSeconds)*time.Second,
+	)
+	defer cancelPublish()
+
 	// Parse message
 	evt, err := processor.ParseOrderCreatedEvent(delivery.Body)
 	if err != nil {
@@ -166,7 +188,7 @@ func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *pr
 			zap.Error(err),
 		)
 		// Send to DLQ immediately for unparseable messages
-		if err := sendToDLQ(ctx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, 0, cfg, log); err != nil {
+		if err := sendToDLQ(publishCtx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, 0, cfg, log); err != nil {
 			log.Error("Failed to send malformed message to DLQ, NACKing",
 				zap.String("message_id", delivery.MessageId),
 				zap.Error(err),
@@ -185,12 +207,7 @@ func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *pr
 	}
 
 	// Get retry count from headers
-	retryCount := int32(0)
-	if headers, ok := delivery.Headers["x-retry-count"]; ok {
-		if count, ok := headers.(int32); ok {
-			retryCount = count
-		}
-	}
+	retryCount := retryCountFromHeaders(delivery.Headers)
 
 	// Process event
 	err = processor.ProcessOrderCreated(ctx, evt, "order-worker")
@@ -210,7 +227,7 @@ func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *pr
 				zap.Int32("retry_count", retryCount),
 			)
 			// Send to DLQ
-			if err := sendToDLQ(ctx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, retryCount, cfg, log); err != nil {
+			if err := sendToDLQ(publishCtx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, retryCount, cfg, log); err != nil {
 				log.Error("Failed to send to DLQ after max retries",
 					zap.String("event_id", evt.EventID),
 					zap.Error(err),
@@ -230,7 +247,7 @@ func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *pr
 
 		// Increment retry count and send to retry queue
 		nextRetryCount := retryCount + 1
-		if err := sendToRetry(ctx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, nextRetryCount, cfg, log); err != nil {
+		if err := sendToRetry(publishCtx, amqpClient, delivery.Body, delivery.MessageId, delivery.Headers, nextRetryCount, cfg, log); err != nil {
 			log.Error("Failed to publish to retry queue",
 				zap.String("event_id", evt.EventID),
 				zap.Int32("retry_count", nextRetryCount),
@@ -261,12 +278,39 @@ func handleMessage(ctx context.Context, delivery amqp091.Delivery, processor *pr
 	}
 }
 
-func sendToRetry(ctx context.Context, amqpClient *amqp.Client, body []byte, messageID string, headers amqp091.Table, retryCount int32, cfg *config.Configuration, log *zap.Logger) error {
-	if headers == nil {
-		headers = make(amqp091.Table)
+// retryCountFromHeaders tolera los tipos que RabbitMQ puede usar al decodificar
+// un entero de cabecera (int32, int64, float64 o int).
+func retryCountFromHeaders(headers amqp091.Table) int32 {
+	value, ok := headers["x-retry-count"]
+	if !ok {
+		return 0
 	}
 
+	var count int64
+	switch v := value.(type) {
+	case int32:
+		count = int64(v)
+	case int64:
+		count = v
+	case int:
+		count = int64(v)
+	case float64:
+		count = int64(v)
+	default:
+		return 0
+	}
+	if count < 0 {
+		return 0
+	}
+	return int32(count)
+}
+
+func sendToRetry(ctx context.Context, amqpClient *amqp.Client, body []byte, messageID string, headers amqp091.Table, retryCount int32, cfg *config.Configuration, log *zap.Logger) error {
+	headers = copyHeaders(headers)
 	headers["x-retry-count"] = retryCount
+
+	retryQueue := queue.RetryQueueName(cfg.RabbitMQQueueRetry, int(retryCount))
+	delayMs := queue.RetryDelayMs(cfg.RabbitMQRetryDelayMs, cfg.RabbitMQMaxRetryDelayMs, int(retryCount))
 
 	msg := amqp091.Publishing{
 		ContentType:  "application/json",
@@ -276,7 +320,7 @@ func sendToRetry(ctx context.Context, amqpClient *amqp.Client, body []byte, mess
 		Headers:      headers,
 	}
 
-	err := amqpClient.PublishWithConfirm(ctx, cfg.RabbitMQExchange+".retry", cfg.RabbitMQQueueRetry, true, msg)
+	err := amqpClient.PublishWithConfirm(ctx, cfg.RabbitMQExchange+".retry", retryQueue, true, msg)
 	if err != nil {
 		return fmt.Errorf("failed to publish to retry queue: %w", err)
 	}
@@ -284,17 +328,15 @@ func sendToRetry(ctx context.Context, amqpClient *amqp.Client, body []byte, mess
 	log.Info("Message sent to retry queue",
 		zap.String("message_id", messageID),
 		zap.Int32("retry_count", retryCount),
-		zap.String("queue", cfg.RabbitMQQueueRetry),
+		zap.String("queue", retryQueue),
+		zap.Int("delay_ms", delayMs),
 	)
 
 	return nil
 }
 
 func sendToDLQ(ctx context.Context, amqpClient *amqp.Client, body []byte, messageID string, headers amqp091.Table, retryCount int32, cfg *config.Configuration, log *zap.Logger) error {
-	if headers == nil {
-		headers = make(amqp091.Table)
-	}
-
+	headers = copyHeaders(headers)
 	headers["x-retry-count"] = retryCount
 	headers["x-dead-letter-reason"] = "max_retries_exceeded"
 
@@ -319,4 +361,12 @@ func sendToDLQ(ctx context.Context, amqpClient *amqp.Client, body []byte, messag
 	)
 
 	return nil
+}
+
+func copyHeaders(headers amqp091.Table) amqp091.Table {
+	out := make(amqp091.Table, len(headers)+2)
+	for key, value := range headers {
+		out[key] = value
+	}
+	return out
 }
