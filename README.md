@@ -42,6 +42,7 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 | Reintentos y Dead Letter Queue | Implementado |
 | Docker Compose | Implementado |
 | Migraciones SQL iniciales | Implementado |
+| Timeouts HTTP y límite de body | Implementado |
 | Swagger | Implementado |
 | Outbox Pattern | No implementado |
 
@@ -141,7 +142,8 @@ eventflow/
 ├── pkg/
 │   └── amqp/                 # Cliente y funcionalidades RabbitMQ
 │
-├── migrations/               # Scripts SQL de inicialización
+├── migrations/               # Scripts SQL de inicialización (*.up.sql)
+│   └── down/                 # Scripts de rollback manual (*.down.sql)
 │
 ├── docs/                     # Documentación Swagger
 │
@@ -215,7 +217,7 @@ La base de datos contempla las siguientes tablas:
 
 ### Migraciones SQL
 
-Los scripts de inicialización se encuentran en el directorio `migrations/`.
+Los scripts de inicialización (`*.up.sql`) se encuentran en el directorio `migrations/`. Los scripts de rollback (`*.down.sql`) viven en `migrations/down/` y **no se ejecutan automáticamente**: la imagen oficial de PostgreSQL solo procesa los archivos del nivel superior del directorio montado, en orden alfabético.
 
 Docker Compose monta este directorio en:
 
@@ -242,6 +244,12 @@ docker compose exec db psql -v ON_ERROR_STOP=1 -U postgres -d microservice -f /d
 ```
 
 Se debe ejecutar únicamente la migración que corresponda al estado real de la base de datos. No se deben volver a aplicar indiscriminadamente scripts que ya fueron ejecutados.
+
+Para aplicar un rollback manual:
+
+```powershell
+docker compose exec db psql -v ON_ERROR_STOP=1 -U postgres -d microservice -f /docker-entrypoint-initdb.d/down/002_create_orders_tables.down.sql
+```
 
 ## 8. Instalación y ejecución
 
@@ -312,6 +320,13 @@ El archivo `.env.example` contiene una referencia de las variables de configurac
 
 El `compose.yaml` actual define directamente buena parte de la configuración de la API, el worker y PostgreSQL. Para RabbitMQ permite sobrescribir el usuario y la contraseña mediante `RABBITMQ_USER` y `RABBITMQ_PASSWORD`, utilizando `guest` como valor predeterminado.
 
+Además, la API aplica límites de entrada configurables por entorno:
+
+| Variable | Valor por defecto | Uso |
+|---|---|---|
+| `REQUEST_TIMEOUT_SECONDS` | `10` | Deadline máximo por petición HTTP (incluye queries y publicación de eventos) |
+| `MAX_BODY_BYTES` | `1048576` | Tamaño máximo del cuerpo de la petición |
+
 Los archivos de entorno locales, como `.env.dev` y `.env.qa`, no deben publicarse en el repositorio.
 
 ## 9. API REST
@@ -379,7 +394,7 @@ El total esperado es:
 10000
 ```
 
-La respuesta exitosa utiliza el código HTTP `201 Created` y entrega los datos de la orden creada.
+La respuesta exitosa utiliza el código HTTP `201 Created` y entrega los datos de la orden creada: `id`, `status` (`pending`) y `created_at`.
 
 ### Consultar una orden
 
@@ -404,7 +419,25 @@ La API devuelve la información de la orden si existe. En caso contrario, respon
 | 400 | Solicitud inválida |
 | 404 | Orden no encontrada |
 | 409 | Conflicto de idempotencia |
+| 413 | Cuerpo de la petición demasiado grande |
 | 500 | Error interno |
+
+### Formato de errores
+
+Los errores de los endpoints de órdenes usan una estructura única:
+
+```json
+{
+  "error": {
+    "type": "VALIDATION_ERROR",
+    "code": "ORDER_INVALID",
+    "message": "items[0].quantity must be greater than 0"
+  },
+  "timestamp": "2026-11-18T12:00:00Z"
+}
+```
+
+Los errores `500` solo exponen `INTERNAL_ERROR` con el mensaje `internal server error`; el detalle técnico (SQL, driver, stack) queda únicamente en los logs del servidor.
 
 ### Swagger
 
@@ -486,7 +519,7 @@ El consumidor utiliza ACK manual y QoS para limitar la cantidad de mensajes entr
 
 El publicador utiliza Publisher Confirms para recibir confirmaciones del broker sobre las publicaciones.
 
-También contempla el manejo de NACK, timeout y mensajes que no pueden ser enrutados cuando se utiliza publicación obligatoria (`mandatory`).
+La correlación de confirmaciones usa la API de confirmaciones diferidas del cliente AMQP, que asigna el *delivery tag* bajo lock y es segura cuando varios requests publican concurrentemente sobre el mismo canal. Un mensaje declarado `mandatory` que no puede enrutarse produce un `basic.return`, que el publicador detecta y reporta como error (RabbitMQ confirma el mensaje igualmente, por lo que el ACK por sí solo no basta).
 
 Esto permite mejorar la confiabilidad de la publicación, aunque no garantiza por sí solo la entrega de eventos de extremo a extremo ni reemplaza el patrón Outbox.
 

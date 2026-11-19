@@ -9,6 +9,7 @@ import (
 	"microservice/pkg/logger"
 	"microservice/pkg/middleware"
 	"os"
+	"time"
 
 	_ "microservice/docs"
 
@@ -54,8 +55,11 @@ func (a *App) Init() error {
 	logger.Success("Configuración cargada correctamente")
 	logger.General("Servidor Configurado")
 
-	router := gin.New()
+	if a.config.AppEnv == "prod" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
+	router := gin.New()
 	if a.config.AppEnv != "prod" {
 		router.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
@@ -72,6 +76,9 @@ func (a *App) Init() error {
 
 	// Middleware Helmet
 	router.Use(middleware.SecurityHeaders())
+
+	// Límite de tamaño de body y deadline por petición
+	router.Use(middleware.Limits(a.config.MaxBodyBytes, time.Duration(a.config.RequestTimeoutSeconds)*time.Second))
 
 	// Otros middlewares
 	//...

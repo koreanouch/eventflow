@@ -13,8 +13,13 @@ import (
 
 func (a *App) Run() error {
 	srv := &http.Server{
-		Addr:    ":" + strconv.Itoa(a.config.Port),
-		Handler: a.router,
+		Addr:              ":" + strconv.Itoa(a.config.Port),
+		Handler:           a.router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {
