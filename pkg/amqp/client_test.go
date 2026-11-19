@@ -2,6 +2,9 @@ package amqp_test
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,31 +116,38 @@ func TestPublishWithConfirm_ConcurrentPublishes(t *testing.T) {
 		t.Fatalf("Failed to declare exchange: %v", err)
 	}
 
-	// NOTE: Go's amqp091-go GetNextPublishSeqNo() is not thread-safe when called
-	// from multiple goroutines concurrently on the same channel.
-	// This test publishes sequentially (one at a time) to validate that we don't
-	// lose confirmations with multiple pending publishes.
-
+	// Publish concurrently to validate that confirmation tracking is safe when
+	// multiple goroutines share the same channel.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	numMessages := 5
+	const numMessages = 50
 
-	// Publish messages sequentially but with very short delays
-	// to test that pending confirmations are handled correctly
+	var wg sync.WaitGroup
+	publishErr := make(chan error, numMessages)
+
 	for i := 0; i < numMessages; i++ {
-		msg := amqp091.Publishing{
-			ContentType: "application/json",
-			Body:        []byte(`{"index":` + string(rune(48+i)) + `}`),
-		}
-
-		err := client.PublishWithConfirm(ctx, "test-exchange", "test.routing.key", false, msg)
-		if err != nil {
-			t.Fatalf("Publish %d failed: %v", i, err)
-		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			msg := amqp091.Publishing{
+				ContentType: "application/json",
+				Body:        []byte(fmt.Sprintf(`{"index":%d}`, i)),
+			}
+			if err := client.PublishWithConfirm(ctx, "test-exchange", "test.routing.key", false, msg); err != nil {
+				publishErr <- fmt.Errorf("publish %d failed: %w", i, err)
+			}
+		}(i)
 	}
 
-	t.Logf("Successfully published %d messages sequentially", numMessages)
+	wg.Wait()
+	close(publishErr)
+
+	for err := range publishErr {
+		t.Error(err)
+	}
+
+	t.Logf("Successfully published %d messages concurrently", numMessages)
 }
 
 func TestPublishWithConfirm_NotRouted_Mandatory(t *testing.T) {
@@ -172,16 +182,16 @@ func TestPublishWithConfirm_NotRouted_Mandatory(t *testing.T) {
 		Body:        []byte(`{"test":"unroutable"}`),
 	}
 
-	// Publish with mandatory=true to trigger a return
+	// Publish with mandatory=true to trigger a basic.return.
 	err = client.PublishWithConfirm(ctx, "test-exchange-unrouted", "nonexistent.routing.key", true, msg)
 
-	// According to AMQP spec: if mandatory=true and message is not routable,
-	// we get a basic.return followed by basic.nack
-	// So we expect a NACK error
+	// RabbitMQ emits basic.return (and still ACKs the message), so the publisher
+	// must detect the return and report it as an error.
 	if err == nil {
-		t.Logf("Message was not returned (might not have any bindings)")
-	} else if err.Error() != "message not acknowledged by RabbitMQ (NACK)" {
-		t.Logf("Got error: %v", err)
+		t.Fatal("Expected error for unroutable mandatory message, got nil")
+	}
+	if !strings.Contains(err.Error(), "unroutable") {
+		t.Fatalf("Expected unroutable error, got: %v", err)
 	}
 }
 
