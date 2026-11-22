@@ -29,6 +29,7 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 |---|---|
 | API REST con Gin | Implementado |
 | Health checks v1 y v2 | Implementado |
+| Métricas básicas (`/metrics`) | Implementado |
 | Dominio y reglas de negocio | Implementado |
 | Persistencia PostgreSQL | Implementado |
 | Creación y consulta de órdenes | Implementado |
@@ -473,6 +474,48 @@ La documentación interactiva se encuentra disponible en:
 http://localhost:3200/docs/index.html
 ```
 
+### Métricas operativas
+
+```http
+GET /metrics
+```
+
+Expone métricas en formato texto de Prometheus. El endpoint se registra fuera de `/api` y antes de los middlewares de negocio, de modo que el scraping no altere las métricas de tráfico ni los logs de acceso.
+
+| Métrica | Tipo | Etiquetas | Significado |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `route`, `status` | Peticiones HTTP atendidas |
+| `http_request_duration_seconds` | summary | `method`, `route` | Latencia acumulada (suma y cantidad) |
+| `orders_created_total` | counter | — | Órdenes nuevas persistidas |
+| `orders_idempotent_replays_total` | counter | — | Reintentos con la misma clave que devolvieron la orden existente |
+| `order_events_published_total` | counter | — | Eventos publicados con confirmación |
+| `order_event_publish_failures_total` | counter | — | Fallos de publicación |
+| `order_event_publish_skipped_total` | counter | — | Eventos omitidos por broker no disponible |
+| `worker_messages_processed_total` | counter | — | Mensajes procesados correctamente |
+| `worker_messages_failed_total` | counter | — | Procesamientos fallidos |
+| `worker_messages_invalid_total` | counter | — | Mensajes que no se pudieron deserializar |
+| `worker_messages_retried_total` | counter | `retry` | Mensajes enviados a la cola de reintento |
+| `worker_messages_dead_lettered_total` | counter | `reason` | Mensajes enviados a la DLQ |
+| `worker_publish_failures_total` | counter | `target` | Fallos al publicar un reintento o la DLQ |
+| `worker_processing_duration_seconds` | summary | `consumer` | Tiempo de procesamiento de eventos |
+
+Ejemplo:
+
+```powershell
+curl.exe -s http://localhost:3200/metrics
+```
+
+```text
+# TYPE http_requests_total counter
+http_requests_total{method="POST",route="/api/v1/orders",status="201"} 3
+# TYPE orders_created_total counter
+orders_created_total 3
+# TYPE worker_messages_retried_total counter
+worker_messages_retried_total{retry="1"} 1
+```
+
+Las métricas se mantienen en memoria del proceso y se reinician con él. Para producción se recomienda exportarlas a Prometheus u OpenTelemetry y proteger el endpoint en una red interna. La etiqueta `route` usa el patrón registrado, no la URL concreta, para evitar una cardinalidad ilimitada.
+
 ## 10. Idempotencia
 
 La creación de órdenes utiliza el header `Idempotency-Key`.
@@ -623,7 +666,7 @@ No se implementó en esta versión porque se priorizó mantener el alcance y la 
 
 - Incorporar un gestor de migraciones versionadas.
 - Profundizar las pruebas de fallos y recuperación de RabbitMQ con un broker real.
-- Añadir métricas operacionales (latencia, reintentos, DLQ) y trazas.
+- Exportar las métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
 - Incorporar Outbox para resolver la brecha entre persistencia y publicación.
 
 ## 13. Pruebas
@@ -721,6 +764,8 @@ La disponibilidad de estos comandos depende de los targets definidos en el `Make
 | Timeout de procesamiento | Se trata como fallo transitorio y se reintenta |
 | Broker caído al arrancar | La API inicia en modo degradado y el health responde `degraded` |
 | Base de datos caída | Health responde `503` con `status: unhealthy` |
+| Consulta de métricas | `/metrics` expone contadores de peticiones, órdenes, eventos y worker |
+| Reintento idempotente | Incrementa `orders_idempotent_replays_total` sin sumar `orders_created_total` |
 
 Los escenarios anteriores corresponden a los casos contemplados en las pruebas y en la implementación.
 
@@ -793,6 +838,7 @@ La evidencia complementaria puede incluir:
 - Logs del worker.
 - Registro de la notificación y del evento procesado en PostgreSQL.
 - Resultado de pruebas automatizadas.
+- Respuesta de `/metrics` con los contadores actualizados.
 
 ## 15. Decisiones técnicas y trade-offs
 
@@ -807,6 +853,7 @@ La evidencia complementaria puede incluir:
 | SQL explícito | Control sobre el esquema y las consultas | Las migraciones requieren mayor disciplina |
 | Idempotencia | Reduce duplicaciones por reintentos HTTP | Requiere controlar claves y contenido |
 | Publisher Confirms | Permite conocer la confirmación del broker | No resuelve por sí solo la atomicidad con PostgreSQL |
+| Métricas en memoria | Observabilidad básica sin dependencias adicionales | Se pierden al reiniciar y no agregan datos entre réplicas |
 
 Se priorizó una arquitectura simple y explicable, manteniendo las dependencias necesarias para cumplir el objetivo del proyecto.
 
@@ -853,7 +900,7 @@ Las siguientes mejoras quedan fuera del alcance de esta versión:
 1. Implementar Transactional Outbox.
 2. Incorporar un sistema de migraciones versionadas.
 3. Profundizar las pruebas de concurrencia y recuperación.
-4. Ampliar métricas y trazabilidad de eventos.
+4. Exportar métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
 5. Mejorar la gestión de secretos y configuración por ambiente.
 6. Evaluar estrategias adicionales de resiliencia ante indisponibilidad del broker.
 
