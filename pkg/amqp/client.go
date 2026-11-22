@@ -52,6 +52,18 @@ func (c *Client) Channel() *amqp.Channel {
 	return c.channel
 }
 
+// Ping comprueba que la conexión y el canal sigan abiertos. RabbitMQ cierra
+// ambos ante fallos de red, por lo que sirve como readiness básico.
+func (c *Client) Ping() error {
+	if c.conn == nil || c.conn.IsClosed() {
+		return fmt.Errorf("rabbitmq connection is closed")
+	}
+	if c.channel == nil || c.channel.IsClosed() {
+		return fmt.Errorf("rabbitmq channel is closed")
+	}
+	return nil
+}
+
 func (c *Client) Close() error {
 	var errCh, errConn error
 

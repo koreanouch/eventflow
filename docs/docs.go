@@ -32,13 +32,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/dto.HealthResponse"
+                            "$ref": "#/definitions/microservice_internal_health_application_dto.HealthResponse"
                         }
                     },
                     "503": {
                         "description": "Service Unavailable",
                         "schema": {
-                            "$ref": "#/definitions/dto.ErrorResponse"
+                            "$ref": "#/definitions/microservice_internal_health_application_dto.ErrorResponse"
                         }
                     }
                 }
@@ -64,7 +64,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/dto.CreateOrderRequest"
+                            "$ref": "#/definitions/microservice_internal_order_application_dto.CreateOrderRequest"
                         }
                     },
                     {
@@ -79,31 +79,31 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/dto.CreateOrderResponse"
+                            "$ref": "#/definitions/microservice_internal_order_application_dto.CreateOrderResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     },
                     "409": {
                         "description": "Conflict",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     },
                     "413": {
                         "description": "Request Entity Too Large",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     }
                 }
@@ -135,19 +135,19 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/dto.GetOrderResponse"
+                            "$ref": "#/definitions/microservice_internal_order_application_dto.GetOrderResponse"
                         }
                     },
                     "404": {
                         "description": "Not Found",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
                         "schema": {
-                            "$ref": "#/definitions/httputil.ErrorResponse"
+                            "$ref": "#/definitions/microservice_pkg_httputil.ErrorResponse"
                         }
                     }
                 }
@@ -155,7 +155,45 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "dto.CreateOrderRequest": {
+        "microservice_internal_health_application_dto.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string",
+                    "example": "Service unhealthy"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "example": "2024-01-15T10:30:00Z"
+                }
+            }
+        },
+        "microservice_internal_health_application_dto.HealthResponse": {
+            "type": "object",
+            "properties": {
+                "database": {
+                    "type": "string",
+                    "example": "connected"
+                },
+                "rabbitmq": {
+                    "type": "string",
+                    "example": "connected"
+                },
+                "service": {
+                    "type": "string",
+                    "example": "microservice"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "ok"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "example": "2024-01-15T10:30:00Z"
+                }
+            }
+        },
+        "microservice_internal_order_application_dto.CreateOrderRequest": {
             "type": "object",
             "required": [
                 "customer_id",
@@ -169,12 +207,12 @@ const docTemplate = `{
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "$ref": "#/definitions/dto.OrderItemDTO"
+                        "$ref": "#/definitions/microservice_internal_order_application_dto.OrderItemDTO"
                     }
                 }
             }
         },
-        "dto.CreateOrderResponse": {
+        "microservice_internal_order_application_dto.CreateOrderResponse": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -191,20 +229,7 @@ const docTemplate = `{
                 }
             }
         },
-        "dto.ErrorResponse": {
-            "type": "object",
-            "properties": {
-                "error": {
-                    "type": "string",
-                    "example": "Service unhealthy"
-                },
-                "timestamp": {
-                    "type": "string",
-                    "example": "2024-01-15T10:30:00Z"
-                }
-            }
-        },
-        "dto.GetOrderItemDTO": {
+        "microservice_internal_order_application_dto.GetOrderItemDTO": {
             "type": "object",
             "properties": {
                 "product_id": {
@@ -221,7 +246,7 @@ const docTemplate = `{
                 }
             }
         },
-        "dto.GetOrderResponse": {
+        "microservice_internal_order_application_dto.GetOrderResponse": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -239,7 +264,7 @@ const docTemplate = `{
                 "items": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/dto.GetOrderItemDTO"
+                        "$ref": "#/definitions/microservice_internal_order_application_dto.GetOrderItemDTO"
                     }
                 },
                 "status": {
@@ -252,23 +277,7 @@ const docTemplate = `{
                 }
             }
         },
-        "dto.HealthResponse": {
-            "type": "object",
-            "properties": {
-                "database": {
-                    "type": "string"
-                },
-                "service": {
-                    "type": "string",
-                    "example": "microservice-seed-go"
-                },
-                "timestamp": {
-                    "type": "string",
-                    "example": "2024-01-15T10.30:00Z"
-                }
-            }
-        },
-        "dto.OrderItemDTO": {
+        "microservice_internal_order_application_dto.OrderItemDTO": {
             "type": "object",
             "required": [
                 "product_id",
@@ -288,7 +297,7 @@ const docTemplate = `{
                 }
             }
         },
-        "httputil.ErrorDetail": {
+        "microservice_pkg_httputil.ErrorDetail": {
             "type": "object",
             "properties": {
                 "code": {
@@ -305,11 +314,11 @@ const docTemplate = `{
                 }
             }
         },
-        "httputil.ErrorResponse": {
+        "microservice_pkg_httputil.ErrorResponse": {
             "type": "object",
             "properties": {
                 "error": {
-                    "$ref": "#/definitions/httputil.ErrorDetail"
+                    "$ref": "#/definitions/microservice_pkg_httputil.ErrorDetail"
                 },
                 "timestamp": {
                     "type": "string"

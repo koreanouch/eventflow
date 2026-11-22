@@ -1,19 +1,46 @@
 basePath: /api/v1
 definitions:
-  dto.CreateOrderRequest:
+  microservice_internal_health_application_dto.ErrorResponse:
+    properties:
+      error:
+        example: Service unhealthy
+        type: string
+      timestamp:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+    type: object
+  microservice_internal_health_application_dto.HealthResponse:
+    properties:
+      database:
+        example: connected
+        type: string
+      rabbitmq:
+        example: connected
+        type: string
+      service:
+        example: microservice
+        type: string
+      status:
+        example: ok
+        type: string
+      timestamp:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+    type: object
+  microservice_internal_order_application_dto.CreateOrderRequest:
     properties:
       customer_id:
         type: string
       items:
         items:
-          $ref: '#/definitions/dto.OrderItemDTO'
+          $ref: '#/definitions/microservice_internal_order_application_dto.OrderItemDTO'
         minItems: 1
         type: array
     required:
     - customer_id
     - items
     type: object
-  dto.CreateOrderResponse:
+  microservice_internal_order_application_dto.CreateOrderResponse:
     properties:
       created_at:
         example: "2024-01-15T10:30:00Z"
@@ -25,16 +52,7 @@ definitions:
         example: pending
         type: string
     type: object
-  dto.ErrorResponse:
-    properties:
-      error:
-        example: Service unhealthy
-        type: string
-      timestamp:
-        example: "2024-01-15T10:30:00Z"
-        type: string
-    type: object
-  dto.GetOrderItemDTO:
+  microservice_internal_order_application_dto.GetOrderItemDTO:
     properties:
       product_id:
         example: prod-456
@@ -46,7 +64,7 @@ definitions:
         example: 2500
         type: integer
     type: object
-  dto.GetOrderResponse:
+  microservice_internal_order_application_dto.GetOrderResponse:
     properties:
       created_at:
         example: "2024-01-15T10:30:00Z"
@@ -59,7 +77,7 @@ definitions:
         type: string
       items:
         items:
-          $ref: '#/definitions/dto.GetOrderItemDTO'
+          $ref: '#/definitions/microservice_internal_order_application_dto.GetOrderItemDTO'
         type: array
       status:
         example: pending
@@ -68,18 +86,7 @@ definitions:
         example: 5000
         type: integer
     type: object
-  dto.HealthResponse:
-    properties:
-      database:
-        type: string
-      service:
-        example: microservice-seed-go
-        type: string
-      timestamp:
-        example: 2024-01-15T10.30:00Z
-        type: string
-    type: object
-  dto.OrderItemDTO:
+  microservice_internal_order_application_dto.OrderItemDTO:
     properties:
       product_id:
         type: string
@@ -93,7 +100,7 @@ definitions:
     - quantity
     - unit_price
     type: object
-  httputil.ErrorDetail:
+  microservice_pkg_httputil.ErrorDetail:
     properties:
       code:
         type: string
@@ -104,10 +111,10 @@ definitions:
       type:
         type: string
     type: object
-  httputil.ErrorResponse:
+  microservice_pkg_httputil.ErrorResponse:
     properties:
       error:
-        $ref: '#/definitions/httputil.ErrorDetail'
+        $ref: '#/definitions/microservice_pkg_httputil.ErrorDetail'
       timestamp:
         type: string
     type: object
@@ -129,11 +136,11 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/dto.HealthResponse'
+            $ref: '#/definitions/microservice_internal_health_application_dto.HealthResponse'
         "503":
           description: Service Unavailable
           schema:
-            $ref: '#/definitions/dto.ErrorResponse'
+            $ref: '#/definitions/microservice_internal_health_application_dto.ErrorResponse'
       summary: Health Check
       tags:
       - Health
@@ -148,7 +155,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/dto.CreateOrderRequest'
+          $ref: '#/definitions/microservice_internal_order_application_dto.CreateOrderRequest'
       - description: Idempotency key (maximum 255 bytes)
         in: header
         name: Idempotency-Key
@@ -160,23 +167,23 @@ paths:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/dto.CreateOrderResponse'
+            $ref: '#/definitions/microservice_internal_order_application_dto.CreateOrderResponse'
         "400":
           description: Bad Request
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
         "413":
           description: Request Entity Too Large
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
       summary: Create Order
       tags:
       - Orders
@@ -198,15 +205,15 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/dto.GetOrderResponse'
+            $ref: '#/definitions/microservice_internal_order_application_dto.GetOrderResponse'
         "404":
           description: Not Found
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            $ref: '#/definitions/httputil.ErrorResponse'
+            $ref: '#/definitions/microservice_pkg_httputil.ErrorResponse'
       summary: Get Order
       tags:
       - Orders

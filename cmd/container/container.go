@@ -4,6 +4,7 @@ import (
 	"context"
 	"microservice/cmd/config"
 	healthUseCase "microservice/internal/health/application/usecase"
+	healthDomain "microservice/internal/health/domain/repository"
 	healthInfra "microservice/internal/health/infrastructure"
 	"microservice/internal/health/presentation/handler"
 	"microservice/internal/order/application/port"
@@ -36,8 +37,6 @@ func NewContainer(cfg *config.Configuration, db database.Database, log *zap.Logg
 
 	// Health dependencies
 	healthRepo := healthInfra.NewPostgresHealthRepository(db)
-	healthUC := healthUseCase.NewHealthUseCase(healthRepo)
-	healthHdlr := handler.NewHealthHandler(healthUC)
 
 	// Order repository
 	orderRepo := orderInfra.NewPostgresOrderRepository(db)
@@ -79,6 +78,13 @@ func NewContainer(cfg *config.Configuration, db database.Database, log *zap.Logg
 	createOrderUC := orderUseCase.NewCreateOrderUseCase(orderRepo, orderPublisher, log)
 	getOrderUC := orderUseCase.NewGetOrderUseCase(orderRepo)
 	orderHdlr := orderHandler.NewOrderHandler(createOrderUC, getOrderUC, log)
+
+	var brokerChecker healthDomain.BrokerHealthChecker
+	if amqpClient != nil {
+		brokerChecker = healthInfra.NewAMQPHealthChecker(amqpClient)
+	}
+	healthUC := healthUseCase.NewHealthUseCase(healthRepo, brokerChecker)
+	healthHdlr := handler.NewHealthHandler(healthUC)
 
 	logger.Success("Container de dependencias inicializado...")
 
