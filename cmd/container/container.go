@@ -18,6 +18,7 @@ import (
 	"microservice/pkg/logger"
 	"time"
 
+	amqplib "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 )
 
@@ -42,7 +43,9 @@ func NewContainer(cfg *config.Configuration, db database.Database, log *zap.Logg
 	orderRepo := orderInfra.NewPostgresOrderRepository(db)
 
 	// AMQP client and publisher. A broker outage must not prevent the API from
-	// starting: orders are still persisted and reads keep working.
+	// starting: orders are still persisted and reads keep working. El cliente es
+	// perezoso y se reconecta solo, de modo que una caída temporal del broker no
+	// deja la publicación deshabilitada para siempre.
 	var (
 		amqpClient     *amqp.Client
 		orderPublisher port.OrderCreatedPublisher
@@ -50,29 +53,29 @@ func NewContainer(cfg *config.Configuration, db database.Database, log *zap.Logg
 		orderEvtPub    *eventpublisher.OrderEventPublisher
 	)
 
-	client, err := amqp.NewClient(cfg.RabbitMQHost, cfg.RabbitMQPort, cfg.RabbitMQUser, cfg.RabbitMQPassword, log)
-	if err != nil {
-		log.Error("RabbitMQ unavailable at startup; event publication is disabled", zap.Error(err))
-		orderPublisher = eventpublisher.NewUnavailablePublisher(log)
-	} else if err := client.EnablePublisherConfirms(); err != nil {
-		log.Error("failed to enable publisher confirms; event publication is disabled", zap.Error(err))
+	client := amqp.NewLazyClient(cfg.RabbitMQHost, cfg.RabbitMQPort, cfg.RabbitMQUser, cfg.RabbitMQPassword, log)
+	if err := client.EnablePublisherConfirms(); err != nil {
+		log.Error("failed to configure publisher confirms", zap.Error(err))
 		_ = client.Close()
 		orderPublisher = eventpublisher.NewUnavailablePublisher(log)
 	} else {
+		// Al reconectar hay que restaurar la topología (exchanges, colas,
+		// reintentos y DLQ) porque el canal nuevo no conoce lo declarado antes.
+		client.OnReconnect(func(ch *amqplib.Channel) error {
+			return queue.SetupOrderQueues(ch, cfg, log)
+		})
+
 		setupCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-		mgr := queue.NewQueueManager(client.Channel(), cfg, log)
-		if err := mgr.SetupOrderQueues(setupCtx); err != nil {
-			cancel()
-			log.Error("failed to setup RabbitMQ queues; event publication is disabled", zap.Error(err))
-			_ = client.Close()
-			orderPublisher = eventpublisher.NewUnavailablePublisher(log)
-		} else {
-			cancel()
-			amqpClient = client
-			queueMgr = mgr
-			orderEvtPub = eventpublisher.NewOrderEventPublisher(client, cfg, log)
-			orderPublisher = orderEvtPub
+		err := client.EnsureConnected(setupCtx)
+		cancel()
+		if err != nil {
+			log.Error("RabbitMQ unavailable at startup; will retry on demand", zap.Error(err))
 		}
+
+		amqpClient = client
+		queueMgr = queue.NewQueueManager(client.Channel(), cfg, log)
+		orderEvtPub = eventpublisher.NewOrderEventPublisher(client, cfg, log)
+		orderPublisher = orderEvtPub
 	}
 
 	createOrderUC := orderUseCase.NewCreateOrderUseCase(orderRepo, orderPublisher, log)

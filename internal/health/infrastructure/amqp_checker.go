@@ -20,5 +20,5 @@ func (c *AMQPHealthChecker) Ping(ctx context.Context) error {
 	if c.client == nil {
 		return fmt.Errorf("rabbitmq client is not configured")
 	}
-	return c.client.Ping()
+	return c.client.PingContext(ctx)
 }
