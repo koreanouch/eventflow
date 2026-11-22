@@ -629,10 +629,11 @@ El proyecto implementa distintos mecanismos para mejorar la confiabilidad:
 - Persistencia de eventos procesados.
 - Cierre controlado de procesos.
 - Arranque de la API en modo degradado si RabbitMQ no está disponible.
+- Reconexión automática de API y worker tras una caída o reinicio del broker.
 
 ### API con el broker no disponible
 
-La API no depende de RabbitMQ para arrancar. Si la conexión o la declaración de colas falla, el servicio registra el error y arranca en modo degradado: `POST /orders` sigue persistiendo pedidos, `GET /orders/{id}` y los healthchecks funcionan, y la publicación de eventos se omite dejando constancia en los logs. El worker, en cambio, sí requiere el broker para consumir.
+La API no depende de RabbitMQ para arrancar. Si la conexión o la declaración de colas falla, el servicio registra el error y arranca en modo degradado: `POST /orders` sigue persistiendo pedidos, `GET /orders/{id}` y los healthchecks funcionan, y la publicación de eventos se registra como fallo (contador `order_event_publish_failures_total`). La conexión es perezosa y se recupera sola: al volver el broker, el siguiente `POST`, un nuevo consumo del worker o un healthcheck restablecen la conexión, reaplican publisher confirms, QoS y la topología (exchanges, colas, reintentos y DLQ). El worker reintenta el consumo cada pocos segundos si el canal de deliveries se cierra.
 
 ### Correlación de solicitudes y eventos
 
@@ -763,6 +764,7 @@ La disponibilidad de estos comandos depende de los targets definidos en el `Make
 | Mensaje malformado | Se envía directamente a la DLQ |
 | Timeout de procesamiento | Se trata como fallo transitorio y se reintenta |
 | Broker caído al arrancar | La API inicia en modo degradado y el health responde `degraded` |
+| Broker reiniciado en caliente | La API y el worker reconectan, restauran topología y vuelven a publicar/consumir sin reiniciar contenedores |
 | Base de datos caída | Health responde `503` con `status: unhealthy` |
 | Consulta de métricas | `/metrics` expone contadores de peticiones, órdenes, eventos y worker |
 | Reintento idempotente | Incrementa `orders_idempotent_replays_total` sin sumar `orders_created_total` |
@@ -813,32 +815,153 @@ Resultado esperado: el worker lo envía a `orders.dlq` con `x-dead-letter-reason
 
 ## 14. Evidencia de ejecución
 
-Durante las pruebas funcionales se verificó el flujo de creación y consulta de órdenes.
+Salidas reales obtenidas el **2026-11-22** sobre Windows 11 con `docker compose up -d --build` (PostgreSQL 15, RabbitMQ 3.13, API y worker). Los identificadores y fechas se conservan; no se registran datos sensibles.
 
-También se comprobó el procesamiento asíncrono mediante los logs del worker.
+### 14.1. Flujo base
 
-Ejemplo de log de procesamiento exitoso:
+```powershell
+curl.exe -s -X POST http://localhost:3200/api/v1/orders `
+  -H "Content-Type: application/json" `
+  -H "Idempotency-Key: demo-ok-001-run2" `
+  -H "X-Request-ID: demo-ok-001" `
+  -d '{"customer_id":"customer-demo-ok","items":[{"product_id":"prod-1","quantity":2,"unit_price":1500}]}'
+```
+
+Respuesta `201`:
+
+```json
+{"id":"312f9c0f-c791-4f92-9cb6-34749143d7d8","status":"pending","created_at":"2026-11-22T21:25:21.812846Z"}
+```
+
+`GET /api/v1/orders/{id}` devuelve `200` con `total_amount: 3000` y `status: "pending"`. El worker registra la notificación con la misma correlación:
 
 ```text
 [INFO] Event processed successfully
+{"event_id":"order.created.312f9c0f-...","order_id":"312f9c0f-...","consumer":"order-worker","request_id":"demo-ok-001"}
+[INFO] message processed successfully
+{"message_id":"order.created.312f9c0f-...","request_id":"demo-ok-001"}
+```
+
+### 14.2. Broker caído y recuperación
+
+```powershell
+docker compose stop rabbitmq
+# POST con Idempotency-Key demo-broker-down-002 y X-Request-ID demo-broker-down-002
+```
+
+- `POST /api/v1/orders` responde `201` y la orden queda persistida.
+- Log de la API:
+
+```text
+[ERROR] order persisted but event publication failed
+{"order_id":"934d718f-...","event_id":"order.created.934d718f-...","request_id":"demo-broker-down-002",
+ "error":"failed to publish order created event: failed to connect to RabbitMQ: ..."}
+```
+
+- `GET /api/v1/health` responde `200`:
+
+```json
+{"status":"degraded","database":"connected","rabbitmq":"disconnected"}
+```
+
+- `/metrics` incrementa `order_event_publish_failures_total 1`.
+- Al ejecutar `docker compose start rabbitmq`, el health vuelve a `ok` y un pedido nuevo se publica y consume:
+
+```text
+[INFO] Connected to RabbitMQ            // API: reconexión + topología restaurada
+[INFO] Order created event published    {"request_id":"demo-broker-back-002"}
+[WARN] RabbitMQ deliveries channel closed; reconnecting   // worker
+[INFO] Worker started, listening for messages
+[INFO] Event processed successfully     {"request_id":"demo-broker-back-002"}
+```
+
+> Durante la primera pasada la API **no** reconectaba: mantenía `channel/connection is not open` y el health quedaba en `degraded` hasta reiniciar el contenedor. El fallo se corrigió en el commit `531c370` (reconexión perezosa, restauración de confirms/topología/QoS y reintento de consumo en el worker). La evidencia anterior corresponde a la versión corregida.
+
+### 14.3. Reintentos y DLQ con PostgreSQL caído
+
+```powershell
+docker compose stop db
+# evento válido publicado directamente en orders.exchange con routing key order.created
+# X-Request-ID: demo-db-down-001
+```
+
+Logs del worker:
+
+```text
+[ERROR] failed to process event   {"retry_count":0,"error":"failed to begin transaction: ..."}
+[INFO]  message sent to retry queue {"retry_count":1,"queue":"orders.retry.1","delay_ms":5000}
+[ERROR] failed to process event   {"retry_count":1}
+[INFO]  message sent to retry queue {"retry_count":2,"queue":"orders.retry.2","delay_ms":10000}
+[ERROR] failed to process event   {"retry_count":2}
+[INFO]  message sent to retry queue {"retry_count":3,"queue":"orders.retry.3","delay_ms":20000}
+[ERROR] failed to process event   {"retry_count":3}
+[ERROR] max retries exceeded, sending to DLQ
+[INFO]  message sent to DLQ       {"retry_count":3,"reason":"max_retries_exceeded","routing_key":"dead-letter.retry"}
+```
+
+```text
+$ docker compose exec -T rabbitmq rabbitmqctl list_queues name messages
+name             messages
+orders           0
+orders.retry.1   0
+orders.retry.2   0
+orders.retry.3   0
+orders.dlq       1
+```
+
+Cabeceras del mensaje en la DLQ (Management API):
+
+```json
 {
-  "event_id": "order.created.799207fe-4e4e-4ced-b0ca-454fe7391efd",
-  "order_id": "799207fe-4e4e-4ced-b0ca-454fe7391efd",
-  "consumer": "order-worker"
+  "x-dead-letter-reason": "max_retries_exceeded",
+  "x-retry-count": 3,
+  "x-request-id": "demo-db-down-001",
+  "x-death": [
+    {"queue": "orders.retry.1", "reason": "expired"},
+    {"queue": "orders.retry.2", "reason": "expired"},
+    {"queue": "orders.retry.3", "reason": "expired"}
+  ]
 }
 ```
 
-La evidencia complementaria puede incluir:
+Tras `docker compose start db`, el health vuelve a `ok` y la API sigue operando.
 
-- Respuesta de health check.
-- Respuesta de creación de orden.
-- Consulta de la orden persistida.
-- Reutilización de una clave de idempotencia.
-- Conflicto por reutilización de clave con otro contenido.
-- Logs del worker.
-- Registro de la notificación y del evento procesado en PostgreSQL.
-- Resultado de pruebas automatizadas.
-- Respuesta de `/metrics` con los contadores actualizados.
+### 14.4. Mensaje malformado
+
+Se publica `payload="{"` en `orders.exchange` con `order.created`:
+
+```text
+[ERROR] failed to parse message, sending to DLQ {"message_id":"malformed-demo-001","error":"failed to unmarshal event: unexpected end of JSON input"}
+[INFO]  message sent to DLQ {"reason":"invalid_message","retry_count":0}
+```
+
+La cola `orders.dlq` pasa a 2 mensajes; no hay reintentos.
+
+### 14.5. Pruebas automatizadas
+
+```text
+$ go test -count=1 ./...
+ok   microservice/internal/health/application/usecase
+ok   microservice/internal/health/presentation/handler
+ok   microservice/internal/order/application/usecase
+ok   microservice/internal/order/domain/entity
+ok   microservice/internal/order/infrastructure
+ok   microservice/internal/order/infrastructure/eventpublisher
+ok   microservice/internal/order/infrastructure/processor
+ok   microservice/internal/order/infrastructure/queue
+ok   microservice/internal/order/presentation/handler
+ok   microservice/internal/order/presentation/router
+ok   microservice/pkg/amqp
+ok   microservice/pkg/httputil
+ok   microservice/pkg/middleware
+ok   microservice/pkg/reqid
+```
+
+Notas de entorno:
+
+- En esta máquina Windows una política de Application Control bloquea la ejecución de algunos binarios de test desde `%TEMP%` (`consumer.test.exe`, `metrics.test.exe`). Compilados con `go test -c` y ejecutados desde el repositorio, ambos terminan en `PASS`.
+- `go test -race` no pudo ejecutarse porque no hay compilador C (`gcc`) disponible para `CGO_ENABLED=1`; queda pendiente validarlo en CI o en Linux.
+- Las pruebas de integración de `pkg/amqp` e `internal/order/infrastructure` se ejecutaron contra el RabbitMQ y PostgreSQL de Docker Compose.
 
 ## 15. Decisiones técnicas y trade-offs
 
