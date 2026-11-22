@@ -13,6 +13,9 @@ type CreatedOrder struct {
 	ID        string
 	Status    string
 	CreatedAt time.Time
+	// Created indica si la operación insertó el pedido (true) o si devolvió uno
+	// existente por idempotencia (false).
+	Created bool
 }
 
 type OrderRepository interface {

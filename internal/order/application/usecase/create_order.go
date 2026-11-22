@@ -12,6 +12,7 @@ import (
 	"microservice/internal/order/domain/event"
 	domainrepo "microservice/internal/order/domain/repository"
 	"microservice/pkg/apperrors"
+	"microservice/pkg/metrics"
 	"microservice/pkg/reqid"
 	"strings"
 
@@ -88,6 +89,12 @@ func (uc *CreateOrderUseCase) Execute(ctx context.Context, req *dto.CreateOrderR
 			)
 		}
 		return nil, fmt.Errorf("failed to save order: %w", err)
+	}
+
+	if persisted.Created {
+		metrics.Inc(metrics.OrdersCreatedTotal, nil)
+	} else {
+		metrics.Inc(metrics.OrdersIdempotentReplaysTotal, nil)
 	}
 
 	uc.publishOrderCreated(ctx, persisted.ID, order.CustomerID(), order.TotalAmount())

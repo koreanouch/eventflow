@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"microservice/internal/order/domain/event"
+	"microservice/pkg/metrics"
 
 	"go.uber.org/zap"
 )
@@ -27,6 +28,7 @@ func NewUnavailablePublisher(log *zap.Logger) *UnavailablePublisher {
 }
 
 func (p *UnavailablePublisher) PublishOrderCreated(ctx context.Context, evt *event.OrderCreated) error {
+	metrics.Inc(metrics.OrderEventPublishSkippedTotal, nil)
 	p.log.Warn("event publication skipped: broker unavailable",
 		zap.String("event_id", evt.EventID),
 		zap.String("order_id", evt.OrderID),

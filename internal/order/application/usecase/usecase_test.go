@@ -10,6 +10,7 @@ import (
 	"microservice/internal/order/domain/entity"
 	"microservice/internal/order/domain/event"
 	"microservice/internal/order/domain/repository"
+	"microservice/pkg/metrics"
 	"microservice/pkg/reqid"
 )
 
@@ -38,7 +39,7 @@ func (m *mockOrderRepository) SaveIdempotent(ctx context.Context, order *entity.
 	if err := m.Save(ctx, order); err != nil {
 		return repository.CreatedOrder{}, err
 	}
-	return repository.CreatedOrder{ID: order.ID(), Status: order.Status().String(), CreatedAt: order.CreatedAt()}, nil
+	return repository.CreatedOrder{ID: order.ID(), Status: order.Status().String(), CreatedAt: order.CreatedAt(), Created: true}, nil
 }
 
 func (m *mockOrderRepository) GetByID(ctx context.Context, id string) (*entity.Order, error) {
@@ -340,6 +341,31 @@ func TestCreateOrderUseCase_PropagatesRequestID(t *testing.T) {
 	}
 	if got := mockPublisher.published[0].RequestID; got != "req-abc" {
 		t.Errorf("event RequestID = %q, want req-abc", got)
+	}
+}
+
+func TestCreateOrderUseCase_RecordsCreationMetrics(t *testing.T) {
+	metrics.Reset()
+	defer metrics.Reset()
+
+	uc := NewCreateOrderUseCase(newMockOrderRepository(), nil, nil)
+	if _, err := uc.Execute(context.Background(), validCreateOrderRequest(), "metric-key-1"); err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if got := metrics.CounterValue(metrics.OrdersCreatedTotal, nil); got != 1 {
+		t.Errorf("orders_created_total = %d, want 1", got)
+	}
+
+	replay := &replayOrderRepository{persisted: repository.CreatedOrder{ID: "existing-order"}}
+	uc = NewCreateOrderUseCase(replay, nil, nil)
+	if _, err := uc.Execute(context.Background(), validCreateOrderRequest(), "metric-key-1"); err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if got := metrics.CounterValue(metrics.OrdersIdempotentReplaysTotal, nil); got != 1 {
+		t.Errorf("orders_idempotent_replays_total = %d, want 1", got)
+	}
+	if got := metrics.CounterValue(metrics.OrdersCreatedTotal, nil); got != 1 {
+		t.Errorf("orders_created_total = %d, want 1 (replay must not count as created)", got)
 	}
 }
 

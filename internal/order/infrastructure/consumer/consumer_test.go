@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"microservice/internal/order/domain/event"
+	"microservice/pkg/metrics"
 	"microservice/pkg/reqid"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
@@ -263,6 +264,60 @@ func TestHandle_PropagatesRequestIDToProcessorContext(t *testing.T) {
 
 	if processor.seenRequestID != "req-abc" {
 		t.Errorf("processor context request id = %q, want req-abc", processor.seenRequestID)
+	}
+}
+
+func TestHandle_RecordsMetrics(t *testing.T) {
+	metrics.Reset()
+	defer metrics.Reset()
+
+	// Procesamiento exitoso.
+	handler := newTestHandler(&fakeProcessor{}, &fakePublisher{})
+	msg, _ := newMessage([]byte(`{}`), nil)
+	handler.Handle(context.Background(), msg)
+	if got := metrics.CounterValue(metrics.WorkerMessagesProcessedTotal, nil); got != 1 {
+		t.Errorf("processed = %d, want 1", got)
+	}
+
+	// Fallo transitorio: se registra el fallo y el reintento.
+	handler = newTestHandler(&fakeProcessor{processErr: errors.New("db down")}, &fakePublisher{})
+	msg, _ = newMessage([]byte(`{}`), nil)
+	handler.Handle(context.Background(), msg)
+	if got := metrics.CounterValue(metrics.WorkerMessagesFailedTotal, nil); got != 1 {
+		t.Errorf("failed = %d, want 1", got)
+	}
+	if got := metrics.CounterValue(metrics.WorkerMessagesRetriedTotal, map[string]string{"retry": "1"}); got != 1 {
+		t.Errorf("retried{retry=1} = %d, want 1", got)
+	}
+
+	// Reintentos agotados: DLQ con motivo.
+	handler = newTestHandler(&fakeProcessor{processErr: errors.New("db down")}, &fakePublisher{})
+	msg, _ = newMessage([]byte(`{}`), amqplib.Table{"x-retry-count": int32(3)})
+	handler.Handle(context.Background(), msg)
+	if got := metrics.CounterValue(metrics.WorkerMessagesDeadLetteredTotal, map[string]string{"reason": "max_retries_exceeded"}); got != 1 {
+		t.Errorf("dead-lettered{max_retries_exceeded} = %d, want 1", got)
+	}
+
+	// Mensaje malformado: inválido y a la DLQ.
+	handler = newTestHandler(&fakeProcessor{parseErr: errors.New("invalid json")}, &fakePublisher{})
+	msg, _ = newMessage([]byte(`{`), nil)
+	handler.Handle(context.Background(), msg)
+	if got := metrics.CounterValue(metrics.WorkerMessagesInvalidTotal, nil); got != 1 {
+		t.Errorf("invalid = %d, want 1", got)
+	}
+	if got := metrics.CounterValue(metrics.WorkerMessagesDeadLetteredTotal, map[string]string{"reason": "invalid_message"}); got != 1 {
+		t.Errorf("dead-lettered{invalid_message} = %d, want 1", got)
+	}
+
+	// Fallo al publicar el reintento: se registra el fallo de publicación.
+	handler = newTestHandler(&fakeProcessor{processErr: errors.New("db down")}, &fakePublisher{err: errors.New("broker down")})
+	msg, state := newMessage([]byte(`{}`), nil)
+	handler.Handle(context.Background(), msg)
+	if got := metrics.CounterValue(metrics.WorkerPublishFailuresTotal, map[string]string{"target": "retry"}); got != 1 {
+		t.Errorf("publish failures{retry} = %d, want 1", got)
+	}
+	if state.nacked != 1 || !state.requeue {
+		t.Errorf("expected NACK with requeue, got nack=%d requeue=%v", state.nacked, state.requeue)
 	}
 }
 

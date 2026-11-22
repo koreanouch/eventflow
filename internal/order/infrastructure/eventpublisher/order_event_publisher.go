@@ -8,6 +8,7 @@ import (
 	"microservice/internal/order/application/port"
 	"microservice/internal/order/domain/event"
 	"microservice/pkg/amqp"
+	"microservice/pkg/metrics"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
@@ -53,8 +54,11 @@ func (p *OrderEventPublisher) PublishOrderCreated(ctx context.Context, evt *even
 
 	err = p.client.PublishWithConfirm(ctx, p.cfg.RabbitMQExchange, p.cfg.RabbitMQRoutingKey, true, msg)
 	if err != nil {
+		metrics.Inc(metrics.OrderEventPublishFailuresTotal, nil)
 		return fmt.Errorf("failed to publish order created event: %w", err)
 	}
+
+	metrics.Inc(metrics.OrderEventsPublishedTotal, nil)
 
 	p.log.Info("Order created event published",
 		zap.String("event_id", evt.EventID),

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"microservice/internal/order/domain/event"
 	"microservice/internal/order/infrastructure/queue"
+	"microservice/pkg/metrics"
 	"microservice/pkg/reqid"
+	"strconv"
 	"time"
 
 	amqplib "github.com/rabbitmq/amqp091-go"
@@ -81,6 +83,7 @@ func (h *Handler) Handle(ctx context.Context, msg Message) {
 
 	evt, err := h.processor.ParseOrderCreatedEvent(msg.Body)
 	if err != nil {
+		metrics.Inc(metrics.WorkerMessagesInvalidTotal, nil)
 		log.Error("failed to parse message, sending to DLQ", zap.Error(err))
 		if err := h.sendToDLQ(publishCtx, msg, 0, "invalid_message", log); err != nil {
 			log.Error("failed to send malformed message to DLQ, NACKing", zap.Error(err))
@@ -99,9 +102,14 @@ func (h *Handler) Handle(ctx context.Context, msg Message) {
 	if requestID != "" {
 		processCtx = reqid.WithContext(processCtx, requestID)
 	}
+	processStart := time.Now()
 	err = h.processor.ProcessOrderCreated(processCtx, evt, h.cfg.ConsumerName)
 	cancelProcess()
+	metrics.Observe(metrics.WorkerProcessingDurationSeconds, map[string]string{
+		"consumer": h.cfg.ConsumerName,
+	}, time.Since(processStart).Seconds())
 	if err != nil {
+		metrics.Inc(metrics.WorkerMessagesFailedTotal, nil)
 		log.Error("failed to process event",
 			zap.String("event_id", evt.EventID),
 			zap.Int32("retry_count", retryCount),
@@ -137,6 +145,7 @@ func (h *Handler) Handle(ctx context.Context, msg Message) {
 	}
 
 	h.ack(msg, log)
+	metrics.Inc(metrics.WorkerMessagesProcessedTotal, nil)
 	log.Info("message processed successfully",
 		zap.String("event_id", evt.EventID),
 		zap.String("consumer", h.cfg.ConsumerName),
@@ -158,9 +167,13 @@ func (h *Handler) sendToRetry(ctx context.Context, msg Message, retryCount int32
 		Headers:      headers,
 	})
 	if err != nil {
+		metrics.Inc(metrics.WorkerPublishFailuresTotal, map[string]string{"target": "retry"})
 		return fmt.Errorf("failed to publish to retry queue: %w", err)
 	}
 
+	metrics.Inc(metrics.WorkerMessagesRetriedTotal, map[string]string{
+		"retry": strconv.Itoa(int(retryCount)),
+	})
 	log.Info("message sent to retry queue",
 		zap.Int32("retry_count", retryCount),
 		zap.String("queue", retryQueue),
@@ -183,9 +196,11 @@ func (h *Handler) sendToDLQ(ctx context.Context, msg Message, retryCount int32, 
 		Headers:      headers,
 	})
 	if err != nil {
+		metrics.Inc(metrics.WorkerPublishFailuresTotal, map[string]string{"target": "dlq"})
 		return fmt.Errorf("failed to publish to DLQ: %w", err)
 	}
 
+	metrics.Inc(metrics.WorkerMessagesDeadLetteredTotal, map[string]string{"reason": reason})
 	log.Info("message sent to DLQ",
 		zap.Int32("retry_count", retryCount),
 		zap.String("reason", reason),

@@ -126,8 +126,11 @@ func (r *PostgresOrderRepository) SaveIdempotent(ctx context.Context, order *ent
 		}
 	} else if err != nil {
 		return domainrepo.CreatedOrder{}, fmt.Errorf("failed to insert idempotent order: %w", err)
-	} else if err = insertOrderItems(ctx, tx, order); err != nil {
-		return domainrepo.CreatedOrder{}, err
+	} else {
+		result.Created = true
+		if err = insertOrderItems(ctx, tx, order); err != nil {
+			return domainrepo.CreatedOrder{}, err
+		}
 	}
 
 	if err = tx.Commit(ctx); err != nil {
