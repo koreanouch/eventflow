@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -43,4 +44,13 @@ func MetricsHandler() gin.HandlerFunc {
 		c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_ = metrics.Default().WritePrometheus(c.Writer)
 	}
+}
+
+// MetricsHTTPHandler expone el registro global como http.Handler. Se usa en
+// procesos que no montan Gin, como el servidor de métricas del worker.
+func MetricsHTTPHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_ = metrics.Default().WritePrometheus(w)
+	})
 }

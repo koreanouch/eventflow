@@ -74,6 +74,26 @@ func TestMetricsHandlerExposesPrometheus(t *testing.T) {
 	}
 }
 
+func TestMetricsHTTPHandlerExposesPrometheus(t *testing.T) {
+	metrics.Reset()
+	defer metrics.Reset()
+
+	metrics.Inc("worker_demo_total", nil)
+
+	w := httptest.NewRecorder()
+	MetricsHTTPHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	if !strings.Contains(w.Body.String(), "# TYPE worker_demo_total counter") {
+		t.Errorf("response missing counter:\n%s", w.Body.String())
+	}
+}
+
 func TestMetricsUsesUnmatchedForUnknownRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	metrics.Reset()

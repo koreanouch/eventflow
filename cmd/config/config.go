@@ -31,6 +31,7 @@ type Configuration struct {
 	RabbitMQRetryDelayMs           int    `env:"RABBITMQ_RETRY_DELAY_MS" envDefault:"5000"`
 	RabbitMQMaxRetryDelayMs        int    `env:"RABBITMQ_MAX_RETRY_DELAY_MS" envDefault:"60000"`
 	WorkerProcessingTimeoutSeconds int    `env:"WORKER_PROCESSING_TIMEOUT_SECONDS" envDefault:"30"`
+	WorkerMetricsPort              int    `env:"WORKER_METRICS_PORT" envDefault:"9090"`
 }
 
 func LoadVars() (*Configuration, error) {
