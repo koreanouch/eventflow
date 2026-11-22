@@ -47,6 +47,7 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 | Correlación `X-Request-ID` API → worker | Implementado |
 | Health/readiness con estado de dependencias | Implementado |
 | Reconexión automática API/worker tras caída del broker | Implementado |
+| Integración continua (GitHub Actions) | Implementado |
 | Swagger | Implementado |
 | Outbox Pattern | No implementado |
 
@@ -727,6 +728,18 @@ Este script permite verificar el flujo principal de la aplicación, incluyendo d
 ```
 
 Permite verificar los endpoints disponibles y sus respuestas.
+
+### Integración continua
+
+El workflow `.github/workflows/ci.yml` se ejecuta en cada `push` a `main`/`master`, en pull requests y manualmente. Levanta PostgreSQL 15 y RabbitMQ 3.13 como `services`, aplica las migraciones y ejecuta:
+
+- Comprobación de formato con `gofmt`.
+- `go mod tidy -diff` para detectar dependencias desactualizadas.
+- `go vet ./...` y `go build ./...`.
+- `go test -count=1 ./...` (incluye integraciones contra los servicios).
+- `go test -race -count=1 ./...`.
+
+Si algo falla, publica los logs de los contenedores de PostgreSQL y RabbitMQ para facilitar el diagnóstico.
 
 ### Makefile
 
