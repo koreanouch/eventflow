@@ -43,10 +43,12 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 | Docker Compose | Implementado |
 | Migraciones SQL iniciales | Implementado |
 | Timeouts HTTP y límite de body | Implementado |
+| Correlación `X-Request-ID` API → worker | Implementado |
+| Health/readiness con estado de dependencias | Implementado |
 | Swagger | Implementado |
 | Outbox Pattern | No implementado |
 
-El proyecto cuenta con pruebas para las principales reglas de negocio, persistencia, idempotencia y comportamiento del publicador. Algunos escenarios de operación y concurrencia del sistema distribuido pueden requerir validaciones adicionales en un entorno de ejecución completo.
+El proyecto cuenta con pruebas para las reglas de negocio, persistencia, idempotencia, publicación, política de reintentos/DLQ, salud y correlación. Algunos escenarios de operación pueden requerir validaciones adicionales con el broker y la base de datos reales.
 
 ## 3. Arquitectura
 
@@ -346,7 +348,25 @@ http://localhost:3200
 GET /api/v1/health
 ```
 
-Permite verificar el estado de la API y su conexión con PostgreSQL.
+Permite verificar el estado de la API, su conexión con PostgreSQL y el estado opcional de RabbitMQ.
+
+```json
+{
+  "timestamp": "2026-11-21T10:30:00Z",
+  "service": "microservice",
+  "status": "ok",
+  "database": "connected",
+  "rabbitmq": "connected"
+}
+```
+
+Estados:
+
+| `status` | HTTP | Significado |
+|---|---|---|
+| `ok` | 200 | Base de datos y broker disponibles |
+| `degraded` | 200 | Base de datos disponible, broker caído: la API sigue aceptando pedidos y omite la publicación |
+| `unhealthy` | 503 | Base de datos no disponible: la API no puede persistir pedidos |
 
 ### Health check v2
 
@@ -356,7 +376,7 @@ GET /api/v2/health
 
 Segunda versión del endpoint de salud.
 
-Los healthchecks permiten verificar la disponibilidad de la aplicación y su conexión a la base de datos. No constituyen una validación completa de todas las operaciones del sistema.
+Los healthchecks permiten verificar la disponibilidad de la aplicación y el estado de sus dependencias. La caída de RabbitMQ no marca la API como no lista porque el servicio opera en modo degradado; la caída de PostgreSQL sí devuelve `503`.
 
 ### Crear una orden
 
@@ -369,7 +389,10 @@ Headers:
 ```http
 Content-Type: application/json
 Idempotency-Key: order-example-001
+X-Request-ID: order-example-001
 ```
+
+`X-Request-ID` es opcional: si no se envía, la API genera uno y lo devuelve en la respuesta. Se propaga al evento y al worker para correlacionar los logs.
 
 Body:
 
@@ -500,9 +523,12 @@ Al crear una orden se construye un evento de dominio a partir del agregado persi
   "timestamp": "2026-11-19T10:30:00Z",
   "order_id": "799207fe-4e4e-4ced-b0ca-454fe7391efd",
   "customer_id": "customer-001",
-  "total_amount": 10000
+  "total_amount": 10000,
+  "request_id": "order-example-001"
 }
 ```
+
+El `request_id` viaja también en la cabecera AMQP `x-request-id`; el worker lo usa en sus logs.
 
 El evento se publica desde el caso de uso. Si la publicación falla después de persistir el pedido, la API responde `201` igualmente y registra el error; un reintento del cliente con la misma `Idempotency-Key` vuelve a publicar el evento (el `event_id` es estable y el consumidor es idempotente).
 
@@ -565,6 +591,18 @@ El proyecto implementa distintos mecanismos para mejorar la confiabilidad:
 
 La API no depende de RabbitMQ para arrancar. Si la conexión o la declaración de colas falla, el servicio registra el error y arranca en modo degradado: `POST /orders` sigue persistiendo pedidos, `GET /orders/{id}` y los healthchecks funcionan, y la publicación de eventos se omite dejando constancia en los logs. El worker, en cambio, sí requiere el broker para consumir.
 
+### Correlación de solicitudes y eventos
+
+Cada petición HTTP recibe un `X-Request-ID`: se respeta el enviado por el cliente si es válido o se genera uno nuevo. El identificador:
+
+- Se devuelve en la respuesta HTTP.
+- Se incluye en los logs estructurados de acceso y de error.
+- Se guarda en el contexto de la petición y lo usa el caso de uso.
+- Viaja en el evento (`request_id`) y en la cabecera AMQP `x-request-id`.
+- El worker lo recupera y lo añade a sus logs, incluyendo reintentos y DLQ.
+
+Esto permite seguir un pedido desde el `POST` hasta su notificación sin registrar datos sensibles.
+
 ### Limitación: publicación después de persistir
 
 Actualmente, la orden se persiste en PostgreSQL antes de publicar el evento en RabbitMQ.
@@ -584,11 +622,9 @@ No se implementó en esta versión porque se priorizó mantener el alcance y la 
 ### Otras limitaciones y mejoras futuras
 
 - Incorporar un gestor de migraciones versionadas.
-- Completar pruebas de fallos y recuperación de RabbitMQ.
-- Profundizar las pruebas de concurrencia del publicador.
-- Mejorar la observabilidad y las métricas operacionales.
+- Profundizar las pruebas de fallos y recuperación de RabbitMQ con un broker real.
+- Añadir métricas operacionales (latencia, reintentos, DLQ) y trazas.
 - Incorporar Outbox para resolver la brecha entre persistencia y publicación.
-- Añadir correlación (`request_id`) extremo a extremo entre API y worker.
 
 ## 13. Pruebas
 
@@ -618,7 +654,15 @@ docker run --rm `
   go test -count=1 ./...
 ```
 
-Las pruebas que requieren servicios externos deben ejecutarse con las dependencias correspondientes disponibles y con su configuración de conexión correcta.
+Las pruebas que requieren servicios externos se omiten automáticamente si PostgreSQL o RabbitMQ no están disponibles, de modo que `go test ./...` funciona sin Docker. Para ejecutar las integraciones, levanta las dependencias y vuelve a lanzar las pruebas.
+
+Cobertura destacada de pruebas unitarias:
+
+- Casos de uso de órdenes: validación, idempotencia, publicación y replay.
+- Consumidor: ACK/NACK, reintentos por intento, DLQ, mensajes malformados y timeout de procesamiento.
+- Health: `ok`, `degraded` y `unhealthy` (503).
+- Middleware y `reqid`: generación, validación y propagación de `X-Request-ID`.
+- Backoff exponencial y lectura de cabeceras AMQP.
 
 ### Scripts de prueba
 
@@ -670,9 +714,57 @@ La disponibilidad de estos comandos depende de los targets definidos en el `Make
 | NACK del broker | Se maneja la confirmación negativa |
 | Mensaje obligatorio no enrutado | Se contempla el caso de publicación sin ruta |
 | Desbordamiento del total | Se rechaza el cálculo inválido |
-| Error de procesamiento | Se contempla el mecanismo de reintentos |
+| Error de procesamiento | Reintento en la cola del intento correspondiente |
+| Reintentos agotados | Mensaje publicado en `orders.dlq` con motivo |
+| Fallo al publicar reintento/DLQ | NACK con requeue para no perder el mensaje |
+| Mensaje malformado | Se envía directamente a la DLQ |
+| Timeout de procesamiento | Se trata como fallo transitorio y se reintenta |
+| Broker caído al arrancar | La API inicia en modo degradado y el health responde `degraded` |
+| Base de datos caída | Health responde `503` con `status: unhealthy` |
 
-Los escenarios anteriores corresponden a los casos contemplados en las pruebas y en la implementación. Para una evaluación de extremo a extremo, es importante conservar evidencia de la ejecución de los casos de fallo, además del flujo exitoso.
+Los escenarios anteriores corresponden a los casos contemplados en las pruebas y en la implementación.
+
+### Demostración de escenarios de fallo
+
+**1. RabbitMQ no disponible**
+
+```powershell
+docker compose stop rabbitmq
+curl.exe -i -X POST http://localhost:3200/api/v1/orders `
+  -H "Content-Type: application/json" `
+  -H "Idempotency-Key: fallo-broker-001" `
+  -H "X-Request-ID: demo-broker-down" `
+  -d '{"customer_id":"cust-1","items":[{"product_id":"p1","quantity":1,"unit_price":1000}]}'
+curl.exe -s http://localhost:3200/api/v1/health
+```
+
+Resultado esperado: `POST` devuelve `201`, el pedido queda persistido y el log registra `event publication skipped` / `event publication failed` con `request_id=demo-broker-down`. El health responde `200` con `status: degraded` y `rabbitmq: disconnected`. Al reiniciar RabbitMQ, un nuevo pedido vuelve a publicar eventos.
+
+**2. Fallo transitorio del worker y agotamiento de reintentos**
+
+Se detiene PostgreSQL y se publica un evento válido directamente en el exchange; el worker no podrá procesarlo y entrará en el flujo de reintentos:
+
+```powershell
+docker compose stop db
+docker compose exec rabbitmq rabbitmqadmin publish exchange=orders.exchange routing_key=order.created payload='{"event_id":"order.created.demo-retry","event_type":"order.created","timestamp":"2026-11-21T10:30:00Z","order_id":"demo-retry","customer_id":"cust-1","total_amount":1000,"request_id":"demo-retry"}'
+docker compose logs -f worker
+```
+
+Resultado esperado: el worker registra el fallo, publica en `orders.retry.1`, luego `.2` y `.3`, y finalmente en `orders.dlq` con `x-dead-letter-reason=max_retries_exceeded`. El mensaje original solo se confirma cuando el reintento o la DLQ quedaron publicados.
+
+Inspección de colas:
+
+```powershell
+docker compose exec rabbitmq rabbitmqctl list_queues name messages
+```
+
+**3. Mensaje malformado**
+
+```powershell
+docker compose exec rabbitmq rabbitmqadmin publish exchange=orders.exchange routing_key=order.created payload="{"
+```
+
+Resultado esperado: el worker lo envía a `orders.dlq` con `x-dead-letter-reason=invalid_message` y no entra en el ciclo de reintentos.
 
 ## 14. Evidencia de ejecución
 
