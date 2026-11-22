@@ -7,6 +7,7 @@ import (
 	"microservice/internal/order/application/usecase"
 	"microservice/pkg/apperrors"
 	"microservice/pkg/httputil"
+	"microservice/pkg/reqid"
 	"net/http"
 	"strings"
 
@@ -46,7 +47,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		// El detalle del binding se queda en el log: nunca se devuelve al cliente.
-		h.log.Warn("invalid create order payload", zap.Error(err), zap.String("path", c.FullPath()))
+		h.log.Warn("invalid create order payload", zap.Error(err), zap.String("path", c.FullPath()), zap.String("request_id", reqid.FromContext(c.Request.Context())))
 
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -81,6 +82,7 @@ func (h *OrderHandler) respondError(c *gin.Context, err error) {
 		h.log.Error("request failed",
 			zap.String("method", c.Request.Method),
 			zap.String("path", c.Request.URL.Path),
+			zap.String("request_id", reqid.FromContext(c.Request.Context())),
 			zap.Error(err),
 		)
 	}

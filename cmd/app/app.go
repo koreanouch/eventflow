@@ -65,7 +65,8 @@ func (a *App) Init() error {
 	}
 
 	// Aplicamos Middlewares
-	router.Use(gin.Logger())
+	router.Use(middleware.RequestID())
+	router.Use(middleware.AccessLog(a.log))
 
 	router.Use(middleware.ErrorHandlerMiddleware(a.log)) // Global Error Handler
 

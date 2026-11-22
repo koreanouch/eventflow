@@ -10,6 +10,7 @@ import (
 	"microservice/internal/order/domain/entity"
 	"microservice/internal/order/domain/event"
 	"microservice/internal/order/domain/repository"
+	"microservice/pkg/reqid"
 )
 
 // Mock repository for testing
@@ -322,6 +323,23 @@ func TestCreateOrderUseCase_DoesNotPublishWhenPersistenceFails(t *testing.T) {
 	}
 	if len(mockPublisher.published) != 0 {
 		t.Fatalf("published %d events after failed persistence, want 0", len(mockPublisher.published))
+	}
+}
+
+func TestCreateOrderUseCase_PropagatesRequestID(t *testing.T) {
+	mockRepo := newMockOrderRepository()
+	mockPublisher := &mockEventPublisher{}
+	uc := NewCreateOrderUseCase(mockRepo, mockPublisher, nil)
+
+	ctx := reqid.WithContext(context.Background(), "req-abc")
+	if _, err := uc.Execute(ctx, validCreateOrderRequest(), "test-key"); err != nil {
+		t.Fatalf("Execute() returned unexpected error: %v", err)
+	}
+	if len(mockPublisher.published) != 1 {
+		t.Fatalf("published %d events, want 1", len(mockPublisher.published))
+	}
+	if got := mockPublisher.published[0].RequestID; got != "req-abc" {
+		t.Errorf("event RequestID = %q, want req-abc", got)
 	}
 }
 

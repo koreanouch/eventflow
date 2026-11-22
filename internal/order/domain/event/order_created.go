@@ -12,6 +12,7 @@ type OrderCreated struct {
 	OrderID     string    `json:"order_id"`
 	CustomerID  string    `json:"customer_id"`
 	TotalAmount int64     `json:"total_amount"`
+	RequestID   string    `json:"request_id,omitempty"`
 }
 
 func NewOrderCreated(orderID, customerID string, totalAmount int64) *OrderCreated {

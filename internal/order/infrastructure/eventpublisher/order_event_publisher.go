@@ -47,6 +47,7 @@ func (p *OrderEventPublisher) PublishOrderCreated(ctx context.Context, evt *even
 		Timestamp:    evt.Timestamp,
 		Headers: amqplib.Table{
 			"x-event-type": evt.EventType,
+			"x-request-id": evt.RequestID,
 		},
 	}
 
@@ -59,6 +60,7 @@ func (p *OrderEventPublisher) PublishOrderCreated(ctx context.Context, evt *even
 		zap.String("event_id", evt.EventID),
 		zap.String("order_id", evt.OrderID),
 		zap.String("customer_id", evt.CustomerID),
+		zap.String("request_id", evt.RequestID),
 	)
 
 	return nil

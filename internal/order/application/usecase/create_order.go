@@ -12,6 +12,7 @@ import (
 	"microservice/internal/order/domain/event"
 	domainrepo "microservice/internal/order/domain/repository"
 	"microservice/pkg/apperrors"
+	"microservice/pkg/reqid"
 	"strings"
 
 	"github.com/google/uuid"
@@ -104,10 +105,12 @@ func (uc *CreateOrderUseCase) publishOrderCreated(ctx context.Context, orderID, 
 	}
 
 	evt := event.NewOrderCreated(orderID, customerID, totalAmount)
+	evt.RequestID = reqid.FromContext(ctx)
 	if err := uc.publisher.PublishOrderCreated(ctx, evt); err != nil {
 		uc.log.Error("order persisted but event publication failed",
 			zap.String("order_id", orderID),
 			zap.String("event_id", evt.EventID),
+			zap.String("request_id", evt.RequestID),
 			zap.Error(err),
 		)
 	}

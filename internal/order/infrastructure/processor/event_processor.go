@@ -62,7 +62,10 @@ func (ep *EventProcessor) ProcessOrderCreated(ctx context.Context, evt *event.Or
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
-		ep.log.Info("Event already processed, skipping duplicate", zap.String("event_id", evt.EventID))
+		ep.log.Info("Event already processed, skipping duplicate",
+			zap.String("event_id", evt.EventID),
+			zap.String("request_id", evt.RequestID),
+		)
 		return nil
 	}
 
@@ -109,6 +112,7 @@ func (ep *EventProcessor) ProcessOrderCreated(ctx context.Context, evt *event.Or
 		zap.String("event_id", evt.EventID),
 		zap.String("order_id", evt.OrderID),
 		zap.String("consumer", consumerName),
+		zap.String("request_id", evt.RequestID),
 	)
 
 	return nil

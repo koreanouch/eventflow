@@ -30,6 +30,7 @@ func (p *UnavailablePublisher) PublishOrderCreated(ctx context.Context, evt *eve
 	p.log.Warn("event publication skipped: broker unavailable",
 		zap.String("event_id", evt.EventID),
 		zap.String("order_id", evt.OrderID),
+		zap.String("request_id", evt.RequestID),
 	)
 	return ErrPublisherUnavailable
 }
