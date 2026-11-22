@@ -46,6 +46,7 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 | Timeouts HTTP y límite de body | Implementado |
 | Correlación `X-Request-ID` API → worker | Implementado |
 | Health/readiness con estado de dependencias | Implementado |
+| Reconexión automática API/worker tras caída del broker | Implementado |
 | Swagger | Implementado |
 | Outbox Pattern | No implementado |
 
@@ -707,6 +708,7 @@ Cobertura destacada de pruebas unitarias:
 - Health: `ok`, `degraded` y `unhealthy` (503).
 - Middleware y `reqid`: generación, validación y propagación de `X-Request-ID`.
 - Backoff exponencial y lectura de cabeceras AMQP.
+- Cliente AMQP: reconexión tras pérdida de conexión, ejecución de hooks de topología, cliente perezoso, recuperación de readiness y bloqueo tras `Close`.
 
 ### Scripts de prueba
 
@@ -1022,10 +1024,10 @@ Las siguientes mejoras quedan fuera del alcance de esta versión:
 
 1. Implementar Transactional Outbox.
 2. Incorporar un sistema de migraciones versionadas.
-3. Profundizar las pruebas de concurrencia y recuperación.
+3. Automatizar en CI las pruebas de concurrencia y recuperación que requieren un broker real.
 4. Exportar métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
 5. Mejorar la gestión de secretos y configuración por ambiente.
-6. Evaluar estrategias adicionales de resiliencia ante indisponibilidad del broker.
+6. Añadir backoff exponencial y circuit breaker al proceso de reconexión del broker.
 
 ## 19. Conclusión
 
