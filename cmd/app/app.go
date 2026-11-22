@@ -7,7 +7,6 @@ import (
 	"microservice/cmd/routes"
 	"microservice/pkg/database"
 	"microservice/pkg/logger"
-	"microservice/pkg/metrics"
 	"microservice/pkg/middleware"
 	"os"
 	"time"
@@ -68,10 +67,7 @@ func (a *App) Init() error {
 	// Métricas en formato Prometheus. Se registra antes de los middlewares de
 	// negocio para que el scraping no se mezcle con el tráfico de la API ni
 	// genere ruido en los logs de acceso.
-	router.GET("/metrics", func(c *gin.Context) {
-		c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_ = metrics.Default().WritePrometheus(c.Writer)
-	})
+	router.GET("/metrics", middleware.MetricsHandler())
 
 	// Aplicamos Middlewares
 	router.Use(middleware.RequestID())

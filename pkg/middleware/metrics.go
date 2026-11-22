@@ -34,3 +34,13 @@ func Metrics() gin.HandlerFunc {
 		}, time.Since(start).Seconds())
 	}
 }
+
+// MetricsHandler expone el registro global en formato texto de Prometheus.
+// Debe registrarse antes de los middlewares de negocio para que el scraping no
+// contamine las métricas de tráfico de la API.
+func MetricsHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_ = metrics.Default().WritePrometheus(c.Writer)
+	}
+}

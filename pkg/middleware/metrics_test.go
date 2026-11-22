@@ -40,6 +40,40 @@ func TestMetricsRecordsRequestsAndLatency(t *testing.T) {
 	}
 }
 
+func TestMetricsHandlerExposesPrometheus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	metrics.Reset()
+	defer metrics.Reset()
+
+	metrics.Inc("demo_total", nil)
+	metrics.Observe("demo_duration_seconds", map[string]string{"route": "/test"}, 0.5)
+
+	router := gin.New()
+	router.GET("/metrics", MetricsHandler())
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"# TYPE demo_total counter",
+		"demo_total 1",
+		"# TYPE demo_duration_seconds summary",
+		`demo_duration_seconds_count{route="/test"} 1`,
+		`demo_duration_seconds_sum{route="/test"} 0.5`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("response missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestMetricsUsesUnmatchedForUnknownRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	metrics.Reset()
