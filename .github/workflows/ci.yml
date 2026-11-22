@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, vet and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: microservice
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d microservice"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for file in migrations/*.up.sql; do
+            echo "Applying $file"
+            psql -h localhost -U postgres -d microservice -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Los siguientes archivos no están formateados con gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Service logs on failure
+        if: failure()
+        run: |
+          docker logs "${{ job.services.postgres.id }}" --tail 100 || true
+          docker logs "${{ job.services.rabbitmq.id }}" --tail 100 || true
