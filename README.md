@@ -275,7 +275,7 @@ No es necesario instalar PostgreSQL ni RabbitMQ directamente en el equipo cuando
 ### Clonar el repositorio
 
 ```powershell
-git clone <URL_DEL_REPOSITORIO>
+git clone https://github.com/koreanouch/eventflow.git
 cd eventflow
 ```
 
