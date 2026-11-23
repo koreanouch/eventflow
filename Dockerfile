@@ -1,7 +1,7 @@
 # ================================
 # STAGE 1 : Build
 # ================================
-FROM golang:1.25.5-alpine as builder
+FROM golang:1.27-alpine as builder
 WORKDIR /app
 
 # Instalar swag para generar documentación
