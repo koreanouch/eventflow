@@ -17,7 +17,7 @@ jobs:
   test:
     name: Build, vet and test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -55,17 +55,19 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Se usa la última revisión de 1.27 para incorporar los parches de
+          # seguridad de la librería estándar detectados por govulncheck.
+          go-version: '1.27.x'
           cache: true
 
       - name: Apply migrations
-        env:
-          PGPASSWORD: postgres
         run: |
-          for file in migrations/*.up.sql; do
-            echo "Applying $file"
-            psql -h localhost -U postgres -d microservice -v ON_ERROR_STOP=1 -f "$file"
-          done
+          docker run --rm --network host \
+            -v "$PWD/migrations:/migrations:ro" \
+            migrate/migrate:v4.18.3 \
+            -path=/migrations \
+            -database "postgres://postgres:postgres@localhost:5432/microservice?sslmode=disable" \
+            up
 
       - name: Check formatting
         run: |
@@ -84,6 +86,17 @@ jobs:
 
       - name: Build
         run: go build ./...
+
+      - name: Scan for leaked secrets
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source=/repo --redact -v
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan dependencies for vulnerabilities
+        run: govulncheck ./...
 
       - name: Test
         run: go test -count=1 ./...

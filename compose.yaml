@@ -10,7 +10,6 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -39,14 +38,33 @@ services:
     networks:
       - eventflow-network
 
+  # Aplica las migraciones versionadas antes de arrancar API y worker.
+  # Las migraciones son idempotentes, por lo que también funcionan sobre bases
+  # creadas previamente con docker-entrypoint-initdb.d.
+  migrate:
+    image: migrate/migrate:v4.18.3
+    container_name: eventflow-migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://postgres:${DB_PASSWORD:-postgres}@db:5432/microservice?sslmode=disable"
+      - "up"
+    networks:
+      - eventflow-network
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: eventflow-app
+    restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -66,6 +84,12 @@ services:
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
     ports:
       - "3200:3200"
+    healthcheck:
+      test: ["CMD", "/microservice", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - eventflow-network
 
@@ -74,9 +98,10 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     container_name: eventflow-worker
+    restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -99,6 +124,12 @@ services:
       RABBITMQ_MAX_RETRY_DELAY_MS: 60000
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - eventflow-network
 
