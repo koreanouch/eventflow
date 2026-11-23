@@ -42,7 +42,7 @@ El proyecto prioriza una implementación reproducible y una arquitectura sencill
 | Persistencia de notificaciones | Implementado |
 | Reintentos y Dead Letter Queue | Implementado |
 | Docker Compose | Implementado |
-| Migraciones SQL iniciales | Implementado |
+| Migraciones versionadas (golang-migrate) | Implementado |
 | Timeouts HTTP y límite de body | Implementado |
 | Correlación `X-Request-ID` API → worker | Implementado |
 | Health/readiness con estado de dependencias | Implementado |
@@ -147,8 +147,7 @@ eventflow/
 ├── pkg/
 │   └── amqp/                 # Cliente y funcionalidades RabbitMQ
 │
-├── migrations/               # Scripts SQL de inicialización (*.up.sql)
-│   └── down/                 # Scripts de rollback manual (*.down.sql)
+├── migrations/               # Migraciones versionadas (*.up.sql / *.down.sql)
 │
 ├── docs/                     # Documentación Swagger
 │
@@ -220,41 +219,47 @@ La base de datos contempla las siguientes tablas:
 - `notifications`: notificaciones generadas durante el procesamiento.
 - `processed_events`: eventos procesados por el worker.
 
-### Migraciones SQL
+### Migraciones versionadas
 
-Los scripts de inicialización (`*.up.sql`) se encuentran en el directorio `migrations/`. Los scripts de rollback (`*.down.sql`) viven en `migrations/down/` y **no se ejecutan automáticamente**: la imagen oficial de PostgreSQL solo procesa los archivos del nivel superior del directorio montado, en orden alfabético.
+Las migraciones se gestionan con **golang-migrate**. Cada versión tiene su archivo `*.up.sql` y `*.down.sql` en `migrations/`, y el estado se registra en la tabla `schema_migrations` (`version` + `dirty`).
 
-Docker Compose monta este directorio en:
+Docker Compose incluye un servicio `migrate` que aplica automáticamente las migraciones pendientes antes de arrancar la API y el worker:
 
 ```text
-/docker-entrypoint-initdb.d
+db (healthy) → migrate (up) → app + worker
 ```
 
-La imagen oficial de PostgreSQL ejecuta los scripts compatibles de ese directorio cuando inicializa un directorio de datos vacío.
+Las migraciones están escritas de forma **idempotente** (`IF NOT EXISTS` y comprobación de constraints) para poder baselinar bases de datos creadas antes de adoptar el gestor: en ese caso, la primera ejecución registra la versión sin volver a crear objetos.
 
-**Comportamiento de las migraciones:**
-
-- Primera inicialización: PostgreSQL crea la base de datos y ejecuta los scripts disponibles.
-- Reinicios posteriores: se conserva el volumen y no se vuelven a ejecutar los scripts.
-- Migraciones nuevas: deben aplicarse explícitamente sobre una base de datos que ya fue inicializada.
-
-Actualmente se utiliza el mecanismo de inicialización de la imagen oficial de PostgreSQL. No se ha incorporado un gestor de versiones de migraciones como Flyway o golang-migrate.
-
-### Ejecución manual de una migración
-
-Si se necesita aplicar un script sobre una base de datos existente, se puede utilizar:
+Comandos útiles:
 
 ```powershell
-docker compose exec db psql -v ON_ERROR_STOP=1 -U postgres -d microservice -f /docker-entrypoint-initdb.d/001_create_health_check.up.sql
+# Aplicar migraciones pendientes manualmente
+docker compose run --rm migrate
+
+# Ver la versión aplicada
+docker compose run --rm migrate -path=/migrations `
+  -database "postgres://postgres:postgres@db:5432/microservice?sslmode=disable" version
+
+# Revertir la última migración
+docker compose run --rm migrate -path=/migrations `
+  -database "postgres://postgres:postgres@db:5432/microservice?sslmode=disable" down 1
+
+# Reaplicar todas
+docker compose run --rm migrate -path=/migrations `
+  -database "postgres://postgres:postgres@db:5432/microservice?sslmode=disable" up
 ```
 
-Se debe ejecutar únicamente la migración que corresponda al estado real de la base de datos. No se deben volver a aplicar indiscriminadamente scripts que ya fueron ejecutados.
+Si una migración falla, `schema_migrations.dirty` queda en `true` y el servicio `migrate` termina con error, bloqueando el arranque de la API y el worker hasta corregirlo.
 
-Para aplicar un rollback manual:
+### Migraciones disponibles
 
-```powershell
-docker compose exec db psql -v ON_ERROR_STOP=1 -U postgres -d microservice -f /docker-entrypoint-initdb.d/down/002_create_orders_tables.down.sql
-```
+| Versión | Contenido |
+|---|---|
+| `001` | Tabla `health_checks` |
+| `002` | Tablas `orders` y `order_items` + índices |
+| `003` | Idempotencia: `idempotency_key`, `request_hash` y constraints |
+| `004` | `processed_events` (deduplicación) y `notifications` |
 
 ## 8. Instalación y ejecución
 
@@ -282,17 +287,18 @@ Ejecutar:
 docker compose up --build -d
 ```
 
-Este comando construye las imágenes y levanta los cuatro servicios:
+Este comando construye las imágenes y levanta los servicios:
 
 | Servicio | Función | Puerto |
 |---|---|---|
 | `db` | PostgreSQL | 5432 |
 | `rabbitmq` | RabbitMQ | 5672 |
 | `rabbitmq` | Panel de administración | 15672 |
+| `migrate` | Aplica migraciones y termina | — |
 | `app` | API REST | 3200 |
-| `worker` | Consumidor de eventos | Interno |
+| `worker` | Consumidor de eventos y métricas | 9090 |
 
-La API y el worker esperan a que PostgreSQL y RabbitMQ superen sus respectivos healthchecks antes de iniciar.
+El arranque respeta las dependencias: PostgreSQL y RabbitMQ deben superar sus healthchecks, el servicio `migrate` debe terminar correctamente y solo entonces arrancan la API y el worker. Ambos tienen `restart: unless-stopped` y healthchecks propios (la API mediante `microservice healthcheck` contra `/api/v1/health` y el worker contra `/healthz`).
 
 ### Revisar los servicios
 
@@ -672,6 +678,35 @@ No se implementó en esta versión porque se priorizó mantener el alcance y la 
 - Exportar las métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
 - Incorporar Outbox para resolver la brecha entre persistencia y publicación.
 
+### Preguntas de diseño y respuestas
+
+**¿Qué ocurre si el cliente repite el `POST` porque no recibió respuesta?**
+
+La cabecera `Idempotency-Key` es obligatoria. La orden guarda la clave y un hash SHA-256 del contenido:
+
+- Misma clave y mismo contenido: no se crea otra orden; se devuelve la existente (`201` con el mismo ID).
+- Misma clave y contenido distinto: `409 ORDER_IDEMPOTENCY_CONFLICT`.
+- Sin clave: `400 ORDER_IDEMPOTENCY_KEY_INVALID`.
+
+La comprobación e inserción ocurren en la misma transacción, y hay pruebas secuenciales y concurrentes.
+
+**¿Qué ocurre si el worker procesa el evento y falla antes de confirmar el mensaje?**
+
+El consumo es *at-least-once*. Si el proceso muere antes del ACK, RabbitMQ reentrega el mensaje. Para evitar efectos duplicados, el worker registra `event_id + consumer_name` en `processed_events` y crea la notificación en la **misma transacción**; si ya existe, hace ACK sin repetir el trabajo. Los duplicados quedan documentados como comportamiento esperado.
+
+**¿Cómo se evita perder el evento si la base de datos confirma el pedido pero el broker no está disponible?**
+
+Actualmente no se garantiza entrega exacta: la orden se confirma en PostgreSQL y después se publica. Si la publicación falla, el pedido queda persistido, se registra el fallo (`order_event_publish_failures_total` y log con `request_id`) y el cliente puede reintentar con la misma `Idempotency-Key`, lo que vuelve a disparar la publicación sin duplicar la orden. La solución completa es **Transactional Outbox** (registrar el evento pendiente en la misma transacción y publicarlo desde un relay), documentada como siguiente paso y no exigida en el alcance inicial.
+
+**¿Qué debe ocurrir durante un apagado mientras se procesa un mensaje?**
+
+- API: al recibir `SIGINT`/`SIGTERM` deja de aceptar conexiones (`http.Server.Shutdown`) y espera hasta `SHUTDOWN_TIMEOUT` a las peticiones en curso; después cierra AMQP y PostgreSQL.
+- Worker: cancela el consumidor, deja de tomar mensajes nuevos y espera a que `processingCount` llegue a cero dentro del mismo límite. Si el mensaje no termina, no se hace ACK y RabbitMQ lo reentrega.
+
+**¿Qué componentes pueden seguir siendo módulos del mismo servicio y por qué?**
+
+La API y el worker son procesos separados porque tienen ciclos de vida y escalado distintos (la API escala por tráfico HTTP; el worker por backlog de la cola). El resto —salud, métricas, cliente AMQP, configuración— son módulos internos reutilizados por ambos. No se separaron en microservicios porque no aporta valor: comparten dominio y contratos y un despliegue conjunto simplifica la operación.
+
 ## 13. Pruebas
 
 El proyecto incluye pruebas automatizadas y scripts para verificar los endpoints y el flujo completo.
@@ -736,6 +771,7 @@ El workflow `.github/workflows/ci.yml` se ejecuta en cada `push` a `main`/`maste
 - Comprobación de formato con `gofmt`.
 - `go mod tidy -diff` para detectar dependencias desactualizadas.
 - `go vet ./...` y `go build ./...`.
+- Escaneo de secretos con `gitleaks` y de vulnerabilidades con `govulncheck`.
 - `go test -count=1 ./...` (incluye integraciones contra los servicios).
 - `go test -race -count=1 ./...`.
 
@@ -832,7 +868,25 @@ Resultado esperado: el worker lo envía a `orders.dlq` con `x-dead-letter-reason
 
 Salidas reales obtenidas el **2026-11-22** sobre Windows 11 con `docker compose up -d --build` (PostgreSQL 15, RabbitMQ 3.13, API y worker). Los identificadores y fechas se conservan; no se registran datos sensibles.
 
-### 14.1. Flujo base
+### 14.1. Migraciones y flujo base
+
+Al levantar el entorno, el servicio `migrate` aplica las versiones pendientes y termina:
+
+```text
+1/u create_health_check
+2/u create_orders_tables
+3/u order_idempotency
+4/u event_processing
+```
+
+```text
+$ docker compose exec -T db psql -U postgres -d microservice -c "select version, dirty from schema_migrations;"
+ version | dirty
+---------+-------
+       4 | f
+$ docker compose run --rm migrate
+no change
+```
 
 ```powershell
 curl.exe -s -X POST http://localhost:3200/api/v1/orders `
@@ -1005,6 +1059,7 @@ Se consideran las siguientes prácticas:
 - Publicación de `.env.example` como referencia.
 - Separación de procesos de API y worker.
 - Logging estructurado.
+- Escaneo de secretos (`gitleaks`) y de vulnerabilidades (`govulncheck`) en CI.
 
 Las credenciales incluidas en `compose.yaml` y los valores por defecto de RabbitMQ son exclusivamente para el entorno local de demostración. No deben reutilizarse en producción.
 
@@ -1036,11 +1091,10 @@ Las sugerencias generadas fueron revisadas y contrastadas con la implementación
 Las siguientes mejoras quedan fuera del alcance de esta versión:
 
 1. Implementar Transactional Outbox.
-2. Incorporar un sistema de migraciones versionadas.
-3. Automatizar en CI las pruebas de concurrencia y recuperación que requieren un broker real.
-4. Exportar métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
-5. Mejorar la gestión de secretos y configuración por ambiente.
-6. Añadir backoff exponencial y circuit breaker al proceso de reconexión del broker.
+2. Añadir pruebas de carga y concurrencia sostenida en CI.
+3. Exportar métricas a Prometheus u OpenTelemetry y añadir trazas distribuidas.
+4. Mejorar la gestión de secretos y configuración por ambiente.
+5. Añadir backoff exponencial y circuit breaker al proceso de reconexión del broker.
 
 ## 19. Conclusión
 
