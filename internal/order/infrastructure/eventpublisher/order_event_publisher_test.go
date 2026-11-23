@@ -3,6 +3,7 @@ package eventpublisher_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,6 +13,21 @@ import (
 	"microservice/pkg/amqp"
 	"microservice/pkg/logger"
 )
+
+// bindOrdersQueue declara una cola temporal y la enlaza al exchange para que la
+// publicación con mandatory=true tenga una ruta válida. Sin esto, un broker
+// limpio (como el de CI) devuelve el mensaje como no enrutable.
+func bindOrdersQueue(t *testing.T, client *amqp.Client, exchange, routingKey string) {
+	t.Helper()
+
+	queueName := fmt.Sprintf("orders.test.%d", time.Now().UnixNano())
+	if _, err := client.DeclareQueue(queueName, false, nil); err != nil {
+		t.Fatalf("Failed to declare test queue: %v", err)
+	}
+	if err := client.BindQueue(queueName, exchange, routingKey); err != nil {
+		t.Fatalf("Failed to bind test queue: %v", err)
+	}
+}
 
 func TestPublishOrderCreatedEvent_WithConfirm(t *testing.T) {
 	// Setup logger
@@ -43,6 +59,7 @@ func TestPublishOrderCreatedEvent_WithConfirm(t *testing.T) {
 	if err := client.DeclareExchange("orders.exchange", "topic", true); err != nil {
 		t.Fatalf("Failed to declare exchange: %v", err)
 	}
+	bindOrdersQueue(t, client, "orders.exchange", "order.created")
 
 	// Create publisher
 	publisher := eventpublisher.NewOrderEventPublisher(client, cfg, log)
@@ -126,22 +143,21 @@ func TestPublishOrderCreatedEvent_ContextTimeout(t *testing.T) {
 	if err := client.DeclareExchange("orders.exchange", "topic", true); err != nil {
 		t.Fatalf("Failed to declare exchange: %v", err)
 	}
+	bindOrdersQueue(t, client, "orders.exchange", "order.created")
 
 	publisher := eventpublisher.NewOrderEventPublisher(client, cfg, log)
 	evt := event.NewOrderCreated("test-order-timeout", "test-customer-001", 10000)
 
-	// Use very short timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
-	defer cancel()
+	// Un contexto ya cancelado hace determinista el camino de error, sin
+	// depender de que la publicación tarde más que un timeout de 1 ms.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	err = publisher.PublishOrderCreated(ctx, evt)
 	if err == nil {
-		t.Fatalf("Expected timeout error")
+		t.Fatalf("Expected error publishing with a cancelled context")
 	}
-
-	if err.Error() != "publisher confirmation timeout: context deadline exceeded" {
-		t.Logf("Got error: %v", err)
-	}
+	t.Logf("Got expected error: %v", err)
 }
 
 func TestOrderCreatedEventJSON(t *testing.T) {
